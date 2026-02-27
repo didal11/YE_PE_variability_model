@@ -45,7 +45,8 @@ class GaussianSpec:
 
 @dataclass(frozen=True)
 class LinearMap:
-    # p = A (x - mu_x) + b
+    # p = A * dx + b
+    # dx: process shift vector from nominal baseline
     A: np.ndarray  # (k,6)
     b: np.ndarray  # (k,)
 
@@ -70,12 +71,12 @@ def covariance_to_sigma_and_corr(Sigma: np.ndarray) -> Tuple[np.ndarray, np.ndar
     np.fill_diagonal(corr, 1.0)
     return sigma, corr
 
-def propagate_covariance(spec_x: GaussianSpec, map_px: LinearMap) -> Tuple[np.ndarray, np.ndarray]:
-    """mu_p, Sigma_p"""
-    spec_x.validate()
+def propagate_covariance(spec_dx: GaussianSpec, map_px: LinearMap) -> Tuple[np.ndarray, np.ndarray]:
+    """mu_p, Sigma_p for p = A*dx + b."""
+    spec_dx.validate()
     map_px.validate()
-    mu_p = map_px.b.copy()
-    Sigma_p = map_px.A @ spec_x.Sigma @ map_px.A.T
+    mu_p = map_px.A @ spec_dx.mu + map_px.b
+    Sigma_p = map_px.A @ spec_dx.Sigma @ map_px.A.T
     return mu_p, Sigma_p
 
 def sample_mvnormal(mu: np.ndarray, Sigma: np.ndarray, n: int, seed: Optional[int] = None) -> np.ndarray:
