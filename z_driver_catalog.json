@@ -1,0 +1,192 @@
+{
+  "version": "2026-02-27",
+  "description": "Proposed extended latent z driver taxonomy (Tier1 + Tier2-ready extensions) provided by user.",
+  "units_note": "Units/normalization follow each item's note; recommended log-parameterization preserved where specified.",
+  "categories": [
+    {
+      "id": "A1",
+      "name": "CD by layer",
+      "drivers": [
+        {"key": "z_CD_GATE", "label": "Gate/poly CD bias", "unit": "nm", "optional": false},
+        {"key": "z_CD_ACTIVE", "label": "Active (OD) CD bias", "unit": "nm", "optional": false},
+        {"key": "z_CD_CONT", "label": "Contact (CA) CD bias", "unit": "nm", "optional": false},
+        {"key": "z_CD_VIA", "label": "Via CD bias", "unit": "nm", "optional": false},
+        {"key": "z_CD_M1", "label": "M1 CD (width) bias", "unit": "nm", "optional": false}
+      ]
+    },
+    {
+      "id": "A2",
+      "name": "Overlay by pair",
+      "drivers": [
+        {"key": "z_OVL_GA_X", "label": "Gate-Active overlay X", "unit": "nm", "optional": false},
+        {"key": "z_OVL_GA_Y", "label": "Gate-Active overlay Y", "unit": "nm", "optional": false},
+        {"key": "z_OVL_CG_X", "label": "Contact-Gate overlay X", "unit": "nm", "optional": false},
+        {"key": "z_OVL_CG_Y", "label": "Contact-Gate overlay Y", "unit": "nm", "optional": false},
+        {"key": "z_OVL_V1M1_X", "label": "Via1-M1 overlay X", "unit": "nm", "optional": true},
+        {"key": "z_OVL_V1M1_Y", "label": "Via1-M1 overlay Y", "unit": "nm", "optional": true}
+      ]
+    },
+    {
+      "id": "A3",
+      "name": "LER / stochastic",
+      "drivers": [
+        {"key": "z_LER_SCALE_GATE", "label": "Gate-edge LER RMS global scale", "unit": "nm", "optional": false},
+        {"key": "z_LER_SCALE_CONT", "label": "Contact-edge LER RMS global scale", "unit": "nm", "optional": true}
+      ],
+      "notes": [
+        "Local LER is treated as epsilon_local (device-level mismatch), not as global z."
+      ]
+    },
+    {
+      "id": "A4",
+      "name": "Focus/Exposure",
+      "drivers": [
+        {"key": "z_FOCUS_GATE", "label": "Gate-layer focus drift", "unit": "normalized_or_nm", "optional": true},
+        {"key": "z_EXPO_GATE", "label": "Gate-layer exposure drift", "unit": "normalized", "optional": true}
+      ]
+    },
+    {
+      "id": "B1",
+      "name": "Etch (depth/profile/corner/damage)",
+      "drivers": [
+        {"key": "z_ETCH_DEPTH_STI", "label": "STI trench depth/over-etch", "unit": "nm", "optional": false},
+        {"key": "z_ETCH_PROFILE_STI", "label": "STI sidewall angle/taper", "unit": "deg_or_normalized", "optional": false},
+        {"key": "z_ETCH_CORNER_STI", "label": "STI corner rounding tendency", "unit": "nm^-1", "optional": false},
+        {"key": "z_ETCH_DAMAGE_STI", "label": "STI etch plasma damage proxy", "unit": "normalized", "optional": false},
+        {"key": "z_ETCH_DEPTH_CONT", "label": "Contact hole depth/over-etch", "unit": "nm", "optional": false},
+        {"key": "z_ETCH_PROFILE_CONT", "label": "Contact taper/profile", "unit": "deg_or_normalized", "optional": false},
+        {"key": "z_ETCH_DAMAGE_CONT", "label": "Contact etch damage proxy", "unit": "normalized", "optional": false},
+        {"key": "z_ETCH_DEPTH_VIA", "label": "Via depth/over-etch", "unit": "nm", "optional": true},
+        {"key": "z_ETCH_PROFILE_VIA", "label": "Via profile", "unit": "normalized", "optional": true}
+      ]
+    },
+    {
+      "id": "C1",
+      "name": "Gate dielectric",
+      "drivers": [
+        {"key": "z_EOT_GATE", "label": "Gate EOT shift", "unit": "A_or_nm", "optional": false},
+        {"key": "z_K_GATE", "label": "Gate dielectric k shift", "unit": "delta_k_over_k_or_normalized", "optional": true},
+        {"key": "z_QF_GATE", "label": "Fixed charge proxy shift", "unit": "normalized", "optional": true},
+        {"key": "z_DIT_GATE", "label": "Interface trap proxy shift", "unit": "normalized", "optional": false}
+      ]
+    },
+    {
+      "id": "C2",
+      "name": "Non-gate dielectrics",
+      "drivers": [
+        {"key": "z_THK_SPACER", "label": "Spacer thickness shift", "unit": "nm", "optional": false},
+        {"key": "z_THK_LINER_STI", "label": "STI liner oxide thickness shift", "unit": "nm", "optional": false},
+        {"key": "z_THK_ILD_FEOL", "label": "FEOL/MOL ILD0 thickness shift", "unit": "nm", "optional": true},
+        {"key": "z_K_ILD", "label": "ILD k shift", "unit": "delta_k_over_k", "optional": false}
+      ]
+    },
+    {
+      "id": "C3",
+      "name": "Metal film",
+      "drivers": [
+        {"key": "z_RHO_METAL", "label": "Metal resistivity shift", "unit": "delta_ln_rho", "optional": false},
+        {"key": "z_THK_METAL", "label": "Metal thickness shift", "unit": "delta_ln_t_or_nm", "optional": false}
+      ]
+    },
+    {
+      "id": "D1",
+      "name": "Channel implant",
+      "drivers": [
+        {"key": "z_DOSE_CH", "label": "Channel implant dose error", "unit": "delta_ln_D", "optional": false},
+        {"key": "z_RP_CH", "label": "Channel implant Rp shift", "unit": "nm", "optional": false},
+        {"key": "z_STRAGGLE_CH", "label": "Channel implant straggle shift", "unit": "nm_or_normalized", "optional": true}
+      ]
+    },
+    {
+      "id": "D2",
+      "name": "S/D implant",
+      "drivers": [
+        {"key": "z_DOSE_SD", "label": "S/D implant dose error", "unit": "delta_ln_D", "optional": false},
+        {"key": "z_RP_SD", "label": "S/D implant Rp shift", "unit": "nm", "optional": false}
+      ]
+    },
+    {
+      "id": "D3",
+      "name": "Halo implant",
+      "drivers": [
+        {"key": "z_DOSE_HALO", "label": "Halo dose error", "unit": "delta_ln_D", "optional": false},
+        {"key": "z_RP_HALO", "label": "Halo penetration/Rp shift", "unit": "nm", "optional": false}
+      ]
+    },
+    {
+      "id": "D4",
+      "name": "Well implant",
+      "drivers": [
+        {"key": "z_DOSE_WELL", "label": "Well dose error", "unit": "delta_ln_D", "optional": true},
+        {"key": "z_DEPTH_WELL", "label": "Well depth shift", "unit": "nm", "optional": true}
+      ]
+    },
+    {
+      "id": "E",
+      "name": "Anneal / thermal",
+      "drivers": [
+        {"key": "z_ACT_EFF", "label": "Activation efficiency shift", "unit": "delta_ln_eta", "optional": false},
+        {"key": "z_DIFF_LAT", "label": "Lateral diffusion length shift", "unit": "nm", "optional": false},
+        {"key": "z_DIFF_VER", "label": "Vertical diffusion / Xj shift", "unit": "nm", "optional": false},
+        {"key": "z_THERM_RECOVERY", "label": "Damage recovery efficacy", "unit": "normalized", "optional": false}
+      ]
+    },
+    {
+      "id": "F",
+      "name": "Cleaning / surface",
+      "drivers": [
+        {"key": "z_CLEAN_INTERFACE", "label": "Interface quality proxy", "unit": "normalized", "optional": false},
+        {"key": "z_CLEAN_RESIDUE", "label": "Residue/contamination proxy", "unit": "normalized", "optional": false},
+        {"key": "z_CLEAN_METAL_IF", "label": "Metal/contact interface quality proxy", "unit": "normalized", "optional": false}
+      ]
+    },
+    {
+      "id": "G",
+      "name": "CMP",
+      "drivers": [
+        {"key": "z_CMP_DISH_STI", "label": "STI dishing", "unit": "nm", "optional": false},
+        {"key": "z_CMP_ERO_STI", "label": "STI erosion", "unit": "nm", "optional": false},
+        {"key": "z_CMP_DISH_METAL", "label": "Metal dishing", "unit": "nm", "optional": false},
+        {"key": "z_CMP_ERO_METAL", "label": "Metal erosion", "unit": "nm", "optional": false},
+        {"key": "z_CMP_TOPO", "label": "Topography step-height proxy", "unit": "nm", "optional": false}
+      ]
+    },
+    {
+      "id": "H",
+      "name": "Stress",
+      "drivers": [
+        {"key": "z_STRESS_CH_LONG", "label": "Channel longitudinal stress shift", "unit": "MPa_or_GPa", "optional": false},
+        {"key": "z_STRESS_CH_TRAN", "label": "Channel transverse stress shift", "unit": "MPa_or_GPa", "optional": false},
+        {"key": "z_STRESS_STI", "label": "STI-induced stress magnitude shift", "unit": "normalized_or_MPa", "optional": true}
+      ]
+    },
+    {
+      "id": "I",
+      "name": "MOL / contact / via",
+      "drivers": [
+        {"key": "z_RCONT", "label": "Contact resistance driver", "unit": "delta_ln_Rc", "optional": false},
+        {"key": "z_RVIA", "label": "Via resistance driver", "unit": "delta_ln_Rvia", "optional": false},
+        {"key": "z_BARRIER_INT", "label": "Barrier integrity proxy", "unit": "normalized", "optional": true},
+        {"key": "z_SILICIDE_INT", "label": "Silicide/contact interface proxy", "unit": "normalized", "optional": true}
+      ]
+    },
+    {
+      "id": "J",
+      "name": "Interconnect geometry/capacitance",
+      "drivers": [
+        {"key": "z_W_METAL", "label": "Metal width shift", "unit": "delta_ln_w_or_nm", "optional": false},
+        {"key": "z_S_METAL", "label": "Metal spacing shift", "unit": "delta_ln_s_or_nm", "optional": false},
+        {"key": "z_CINT", "label": "Interconnect capacitance driver", "unit": "delta_ln_Cprime_or_delta_k_over_k", "optional": false}
+      ]
+    },
+    {
+      "id": "K",
+      "name": "Defect / leakage mechanism (Tier2-critical)",
+      "drivers": [
+        {"key": "z_SRH_LIFETIME", "label": "SRH lifetime / bulk defect density proxy", "unit": "delta_ln_tau_or_normalized", "optional": false},
+        {"key": "z_BTBT_STRENGTH", "label": "BTBT prefactor/strength proxy", "unit": "delta_ln_prefactor", "optional": false},
+        {"key": "z_JUNC_LEAK_PREF", "label": "Junction leakage prefactor proxy", "unit": "delta_ln", "optional": false}
+      ]
+    }
+  ]
+}
