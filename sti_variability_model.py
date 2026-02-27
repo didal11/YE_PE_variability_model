@@ -6,42 +6,43 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
 
-# ---- Tier1 latent process drivers z ----
+# ---- Tier1 latent process drivers z (fixed 16, as requested) ----
 Z_KEYS: Tuple[str, ...] = (
-    "L_GATE_ELEC",      # Leff proxy
-    "EOT",
-    "CH_DOSE",          # channel implant dose
-    "CH_RP",            # channel implant projected range
-    "ACT_EFF",          # activation efficiency
-    "SD_LDIFF",         # S/D lateral diffusion length
-    "RSD_BASE",         # baseline Rsd process component
-    "CH_STRESS",        # channel stress (longitudinal)
-    "R_CONTACT_BASE",   # contact resistance process component
-    "R_VIA_BASE",       # via resistance process component
-    "RHO_METAL",        # metal resistivity
-    "R_LINE_PER_L",     # line resistance per unit length
-    "C_LINE_PER_L",     # line capacitance per unit length
-    "RDF_DENSITY",      # random dopant fluctuation density
-    "LER_AMP",          # line edge roughness amplitude
+    "CD_G",          # global CD bias
+    "OVL_X",         # overlay X
+    "OVL_Y",         # overlay Y
+    "LER",           # line-edge roughness amplitude
+    "ETCH_RATE",     # etch rate / over-etch depth tendency
+    "ETCH_PROFILE",  # sidewall angle / corner profile tendency
+    "EOT",           # gate dielectric EOT
+    "ILD_THK",       # non-gate dielectric thickness
+    "DOSE",          # implant dose
+    "RP",            # projected range (implant depth)
+    "THERM",         # thermal budget / diffusion
+    "CMP",           # CMP dishing / erosion tendency
+    "STRESS",        # mechanical stress
+    "DEFECT",        # defect / trap density tendency
+    "RCONT",         # contact resistance tendency
+    "RINT",          # interconnect resistance tendency
+    "CINT",          # interconnect capacitance tendency
 )
 
 # ---- Intermediate process state x ----
 X_KEYS: Tuple[str, ...] = (
     "LEFF",
-    "EOT",
-    "NCH_EFF",          # effective channel doping proxy
-    "XJ_EFF",           # effective junction depth proxy
-    "ACT_EFF",
+    "EOT_EFF",
+    "NCH_EFF",
+    "XJ_EFF",
     "LDIFF",
-    "RSD",
-    "STRESS",
-    "RCONTACT",
-    "RVIA",
-    "RHO_METAL",
-    "RWIRE_PER_L",
-    "CWIRE_PER_L",
-    "RDF",
-    "LER",
+    "RSD_EFF",
+    "STRESS_EFF",
+    "RCONTACT_EFF",
+    "RWIRE_EFF",
+    "CWIRE_EFF",
+    "R_CORNER_EFF",
+    "T_LINER_EFF",
+    "DH_STI_EFF",
+    "DEFECT_EFF",
 )
 
 # ---- Injection parameters p (device + interconnect) ----
@@ -93,7 +94,13 @@ def covariance_to_sigma_and_corr(Sigma: np.ndarray) -> Tuple[np.ndarray, np.ndar
     return sigma, corr
 
 
-def propagate_linear(spec_in: GaussianSpec, A: np.ndarray, b: np.ndarray, in_keys: Tuple[str, ...], out_keys: Tuple[str, ...]) -> Tuple[np.ndarray, np.ndarray]:
+def propagate_linear(
+    spec_in: GaussianSpec,
+    A: np.ndarray,
+    b: np.ndarray,
+    in_keys: Tuple[str, ...],
+    out_keys: Tuple[str, ...],
+) -> Tuple[np.ndarray, np.ndarray]:
     _validate_gaussian(spec_in, in_keys, "spec_in")
     if A.shape != (len(out_keys), len(in_keys)):
         raise ValueError(f"A shape must be ({len(out_keys)},{len(in_keys)})")
@@ -108,17 +115,21 @@ def default_z_corr() -> np.ndarray:
     corr = np.eye(len(Z_KEYS), dtype=float)
     zi = {k: i for i, k in enumerate(Z_KEYS)}
 
+    # physically plausible non-zero defaults
     pairs = {
-        ("L_GATE_ELEC", "LER_AMP"): 0.55,
-        ("CH_DOSE", "CH_RP"): -0.35,
-        ("CH_DOSE", "ACT_EFF"): 0.30,
-        ("CH_RP", "SD_LDIFF"): 0.40,
-        ("ACT_EFF", "SD_LDIFF"): 0.45,
-        ("RSD_BASE", "R_CONTACT_BASE"): 0.40,
-        ("R_CONTACT_BASE", "R_VIA_BASE"): 0.35,
-        ("RHO_METAL", "R_LINE_PER_L"): 0.75,
-        ("R_LINE_PER_L", "C_LINE_PER_L"): 0.25,
-        ("RDF_DENSITY", "LER_AMP"): 0.20,
+        ("CD_G", "LER"): 0.45,
+        ("OVL_X", "OVL_Y"): 0.25,
+        ("ETCH_RATE", "ETCH_PROFILE"): 0.35,
+        ("EOT", "ILD_THK"): 0.20,
+        ("DOSE", "RP"): -0.35,
+        ("DOSE", "THERM"): 0.20,
+        ("RP", "THERM"): 0.40,
+        ("CMP", "ILD_THK"): 0.30,
+        ("CMP", "STRESS"): 0.20,
+        ("STRESS", "CD_G"): 0.15,
+        ("RCONT", "RINT"): 0.25,
+        ("RINT", "CINT"): 0.15,
+        ("DEFECT", "LER"): 0.25,
     }
     for (a, b), v in pairs.items():
         i, j = zi[a], zi[b]
@@ -132,43 +143,56 @@ def default_B_z_to_x() -> np.ndarray:
     xi = {k: i for i, k in enumerate(X_KEYS)}
     zi = {k: i for i, k in enumerate(Z_KEYS)}
 
-    # primary couplings
-    B[xi["LEFF"], zi["L_GATE_ELEC"]] = 1.0
-    B[xi["LEFF"], zi["LER_AMP"]] = -0.35
+    # litho / geometry
+    B[xi["LEFF"], zi["CD_G"]] = 0.90
+    B[xi["LEFF"], zi["LER"]] = -0.35
+    B[xi["LEFF"], zi["OVL_X"]] = -0.10
 
-    B[xi["EOT"], zi["EOT"]] = 1.0
+    # dielectric
+    B[xi["EOT_EFF"], zi["EOT"]] = 1.00
+    B[xi["EOT_EFF"], zi["ILD_THK"]] = 0.10
 
-    B[xi["NCH_EFF"], zi["CH_DOSE"]] = 0.85
-    B[xi["NCH_EFF"], zi["CH_RP"]] = -0.25
-    B[xi["NCH_EFF"], zi["ACT_EFF"]] = 0.30
+    # channel / junction
+    B[xi["NCH_EFF"], zi["DOSE"]] = 0.85
+    B[xi["NCH_EFF"], zi["RP"]] = -0.20
+    B[xi["NCH_EFF"], zi["THERM"]] = 0.25
 
-    B[xi["XJ_EFF"], zi["CH_RP"]] = 0.75
-    B[xi["XJ_EFF"], zi["SD_LDIFF"]] = 0.40
+    B[xi["XJ_EFF"], zi["RP"]] = 0.75
+    B[xi["XJ_EFF"], zi["THERM"]] = 0.45
+    B[xi["XJ_EFF"], zi["ETCH_RATE"]] = 0.10
 
-    B[xi["ACT_EFF"], zi["ACT_EFF"]] = 1.0
+    B[xi["LDIFF"], zi["THERM"]] = 0.85
+    B[xi["LDIFF"], zi["DOSE"]] = 0.10
 
-    B[xi["LDIFF"], zi["SD_LDIFF"]] = 0.90
+    # resistance / stress / interconnect
+    B[xi["RSD_EFF"], zi["DOSE"]] = -0.20
+    B[xi["RSD_EFF"], zi["THERM"]] = -0.20
+    B[xi["RSD_EFF"], zi["RCONT"]] = 0.30
 
-    B[xi["RSD"], zi["RSD_BASE"]] = 0.85
-    B[xi["RSD"], zi["ACT_EFF"]] = -0.30
-    B[xi["RSD"], zi["SD_LDIFF"]] = -0.20
+    B[xi["STRESS_EFF"], zi["STRESS"]] = 1.00
+    B[xi["STRESS_EFF"], zi["CMP"]] = 0.15
 
-    B[xi["STRESS"], zi["CH_STRESS"]] = 1.0
+    B[xi["RCONTACT_EFF"], zi["RCONT"]] = 0.95
+    B[xi["RCONTACT_EFF"], zi["OVL_X"]] = 0.10
+    B[xi["RCONTACT_EFF"], zi["OVL_Y"]] = 0.10
 
-    B[xi["RCONTACT"], zi["R_CONTACT_BASE"]] = 0.95
-    B[xi["RCONTACT"], zi["R_VIA_BASE"]] = 0.20
+    B[xi["RWIRE_EFF"], zi["RINT"]] = 0.95
+    B[xi["RWIRE_EFF"], zi["CD_G"]] = -0.15
 
-    B[xi["RVIA"], zi["R_VIA_BASE"]] = 0.95
+    B[xi["CWIRE_EFF"], zi["CINT"]] = 0.95
+    B[xi["CWIRE_EFF"], zi["ILD_THK"]] = -0.20
 
-    B[xi["RHO_METAL"], zi["RHO_METAL"]] = 1.0
-    B[xi["RWIRE_PER_L"], zi["R_LINE_PER_L"]] = 0.90
-    B[xi["RWIRE_PER_L"], zi["RHO_METAL"]] = 0.35
+    # STI-style effective knobs
+    B[xi["R_CORNER_EFF"], zi["ETCH_PROFILE"]] = 0.90
+    B[xi["R_CORNER_EFF"], zi["ETCH_RATE"]] = -0.20
 
-    B[xi["CWIRE_PER_L"], zi["C_LINE_PER_L"]] = 0.95
-    B[xi["CWIRE_PER_L"], zi["L_GATE_ELEC"]] = -0.10
+    B[xi["T_LINER_EFF"], zi["ILD_THK"]] = 0.90
+    B[xi["T_LINER_EFF"], zi["CMP"]] = -0.10
 
-    B[xi["RDF"], zi["RDF_DENSITY"]] = 1.0
-    B[xi["LER"], zi["LER_AMP"]] = 1.0
+    B[xi["DH_STI_EFF"], zi["CMP"]] = 0.85
+    B[xi["DH_STI_EFF"], zi["ETCH_RATE"]] = 0.15
+
+    B[xi["DEFECT_EFF"], zi["DEFECT"]] = 1.00
 
     return B
 
@@ -178,87 +202,73 @@ def default_A_x_to_p() -> np.ndarray:
     xi = {k: i for i, k in enumerate(X_KEYS)}
     pi = {k: i for i, k in enumerate(P_KEYS)}
 
-    # Vth
+    # Vth family (Tier1->x->VTH path emphasized)
     A[pi["DVTH_N"], xi["LEFF"]] = -0.9e-3
-    A[pi["DVTH_N"], xi["EOT"]] = +1.2e-3
-    A[pi["DVTH_N"], xi["NCH_EFF"]] = +0.8e-3
-    A[pi["DVTH_N"], xi["RDF"]] = +0.5e-3
+    A[pi["DVTH_N"], xi["EOT_EFF"]] = +1.2e-3
+    A[pi["DVTH_N"], xi["NCH_EFF"]] = +0.9e-3
+    A[pi["DVTH_N"], xi["DEFECT_EFF"]] = +0.3e-3
 
     A[pi["DVTH_P"], xi["LEFF"]] = +0.8e-3
-    A[pi["DVTH_P"], xi["EOT"]] = -1.1e-3
-    A[pi["DVTH_P"], xi["NCH_EFF"]] = -0.7e-3
-    A[pi["DVTH_P"], xi["RDF"]] = -0.4e-3
+    A[pi["DVTH_P"], xi["EOT_EFF"]] = -1.1e-3
+    A[pi["DVTH_P"], xi["NCH_EFF"]] = -0.8e-3
+    A[pi["DVTH_P"], xi["DEFECT_EFF"]] = -0.3e-3
 
-    # beta / mobility
-    A[pi["DBETA_N"], xi["STRESS"]] = +6.0e-3
+    # beta/mobility
+    A[pi["DBETA_N"], xi["STRESS_EFF"]] = +6.0e-3
     A[pi["DBETA_N"], xi["LEFF"]] = -2.0e-3
-    A[pi["DBETA_N"], xi["RSD"]] = -4.0e-3
+    A[pi["DBETA_N"], xi["RSD_EFF"]] = -4.0e-3
 
-    A[pi["DBETA_P"], xi["STRESS"]] = -4.5e-3
+    A[pi["DBETA_P"], xi["STRESS_EFF"]] = -4.5e-3
     A[pi["DBETA_P"], xi["LEFF"]] = +1.5e-3
-    A[pi["DBETA_P"], xi["RSD"]] = -3.5e-3
+    A[pi["DBETA_P"], xi["RSD_EFF"]] = -3.5e-3
 
     # DIBL / SS
-    A[pi["DDIBL_N"], xi["LEFF"]] = -2.5e-3
-    A[pi["DDIBL_N"], xi["XJ_EFF"]] = +1.6e-3
-    A[pi["DDIBL_N"], xi["EOT"]] = +0.7e-3
+    A[pi["DDIBL_N"], xi["LEFF"]] = -2.4e-3
+    A[pi["DDIBL_N"], xi["XJ_EFF"]] = +1.5e-3
+    A[pi["DDIBL_N"], xi["EOT_EFF"]] = +0.7e-3
 
-    A[pi["DDIBL_P"], xi["LEFF"]] = +2.3e-3
+    A[pi["DDIBL_P"], xi["LEFF"]] = +2.2e-3
     A[pi["DDIBL_P"], xi["XJ_EFF"]] = -1.4e-3
-    A[pi["DDIBL_P"], xi["EOT"]] = -0.6e-3
+    A[pi["DDIBL_P"], xi["EOT_EFF"]] = -0.6e-3
 
-    A[pi["DSS_N"], xi["EOT"]] = +1.3e-3
-    A[pi["DSS_N"], xi["RDF"]] = +0.7e-3
-    A[pi["DSS_N"], xi["LEFF"]] = -0.9e-3
+    A[pi["DSS_N"], xi["EOT_EFF"]] = +1.2e-3
+    A[pi["DSS_N"], xi["DEFECT_EFF"]] = +0.8e-3
+    A[pi["DSS_N"], xi["LEFF"]] = -0.8e-3
 
-    A[pi["DSS_P"], xi["EOT"]] = -1.1e-3
-    A[pi["DSS_P"], xi["RDF"]] = -0.6e-3
+    A[pi["DSS_P"], xi["EOT_EFF"]] = -1.1e-3
+    A[pi["DSS_P"], xi["DEFECT_EFF"]] = -0.7e-3
     A[pi["DSS_P"], xi["LEFF"]] = +0.8e-3
 
-    # Rsd
-    A[pi["DRSD_N"], xi["RSD"]] = +1.0
-    A[pi["DRSD_N"], xi["RCONTACT"]] = +0.20
-    A[pi["DRSD_N"], xi["ACT_EFF"]] = -0.10
+    # Rsd / Cj / leakage
+    A[pi["DRSD_N"], xi["RSD_EFF"]] = 1.00
+    A[pi["DRSD_N"], xi["RCONTACT_EFF"]] = 0.25
+    A[pi["DRSD_P"], xi["RSD_EFF"]] = 0.95
+    A[pi["DRSD_P"], xi["RCONTACT_EFF"]] = 0.25
 
-    A[pi["DRSD_P"], xi["RSD"]] = +0.95
-    A[pi["DRSD_P"], xi["RCONTACT"]] = +0.25
-    A[pi["DRSD_P"], xi["ACT_EFF"]] = -0.08
-
-    # Cj
     A[pi["DCJD_N"], xi["XJ_EFF"]] = +2.0e-3
-    A[pi["DCJD_N"], xi["EOT"]] = +0.5e-3
+    A[pi["DCJD_N"], xi["R_CORNER_EFF"]] = +0.3e-3
     A[pi["DCJD_P"], xi["XJ_EFF"]] = +1.8e-3
-    A[pi["DCJD_P"], xi["EOT"]] = +0.4e-3
+    A[pi["DCJD_P"], xi["R_CORNER_EFF"]] = +0.3e-3
 
     A[pi["DCJS_N"], xi["XJ_EFF"]] = +1.9e-3
-    A[pi["DCJS_N"], xi["LEFF"]] = -0.3e-3
+    A[pi["DCJS_N"], xi["T_LINER_EFF"]] = -0.2e-3
     A[pi["DCJS_P"], xi["XJ_EFF"]] = +1.7e-3
-    A[pi["DCJS_P"], xi["LEFF"]] = +0.3e-3
+    A[pi["DCJS_P"], xi["T_LINER_EFF"]] = -0.2e-3
 
-    # reverse leakage logs
     A[pi["DLNIREVD_N"], xi["XJ_EFF"]] = +8.0e-3
-    A[pi["DLNIREVD_N"], xi["EOT"]] = +2.5e-3
-    A[pi["DLNIREVD_N"], xi["RDF"]] = +2.0e-3
-
+    A[pi["DLNIREVD_N"], xi["DEFECT_EFF"]] = +3.0e-3
     A[pi["DLNIREVD_P"], xi["XJ_EFF"]] = +7.0e-3
-    A[pi["DLNIREVD_P"], xi["EOT"]] = +2.0e-3
-    A[pi["DLNIREVD_P"], xi["RDF"]] = +1.7e-3
+    A[pi["DLNIREVD_P"], xi["DEFECT_EFF"]] = +2.6e-3
 
-    A[pi["DLNIREVS_N"], xi["XJ_EFF"]] = +7.5e-3
-    A[pi["DLNIREVS_N"], xi["EOT"]] = +2.2e-3
-
+    A[pi["DLNIREVS_N"], xi["XJ_EFF"]] = +7.4e-3
+    A[pi["DLNIREVS_N"], xi["DEFECT_EFF"]] = +2.5e-3
     A[pi["DLNIREVS_P"], xi["XJ_EFF"]] = +6.8e-3
-    A[pi["DLNIREVS_P"], xi["EOT"]] = +1.9e-3
+    A[pi["DLNIREVS_P"], xi["DEFECT_EFF"]] = +2.2e-3
 
-    # BEOL/contact
-    A[pi["DRCONTACT"], xi["RCONTACT"]] = +1.0
-    A[pi["DRCONTACT"], xi["RVIA"]] = +0.25
-
-    A[pi["DRWIRE"], xi["RWIRE_PER_L"]] = +1.0
-    A[pi["DRWIRE"], xi["RHO_METAL"]] = +0.35
-
-    A[pi["DCWIRE"], xi["CWIRE_PER_L"]] = +1.0
-    A[pi["DCWIRE"], xi["LEFF"]] = -0.08
+    # interconnect/contact
+    A[pi["DRCONTACT"], xi["RCONTACT_EFF"]] = +1.0
+    A[pi["DRWIRE"], xi["RWIRE_EFF"]] = +1.0
+    A[pi["DCWIRE"], xi["CWIRE_EFF"]] = +1.0
 
     return A
 
@@ -268,9 +278,10 @@ def default_mu_z() -> np.ndarray:
 
 
 def default_sigma_z() -> np.ndarray:
-    return np.array([
-        1.0, 0.8, 1.0, 0.9, 0.8, 0.9, 0.7, 0.8, 0.7, 0.7, 0.6, 0.7, 0.7, 1.0, 1.0
-    ], dtype=float)
+    return np.array(
+        [1.0, 0.8, 0.8, 1.0, 0.8, 0.8, 0.8, 0.7, 1.0, 0.9, 0.8, 0.7, 0.8, 0.9, 0.7, 0.7, 0.7],
+        dtype=float,
+    )
 
 
 def default_mu_eps_x() -> np.ndarray:
@@ -278,19 +289,17 @@ def default_mu_eps_x() -> np.ndarray:
 
 
 def default_sigma_eps_x() -> np.ndarray:
-    return np.array([
-        0.20, 0.15, 0.25, 0.20, 0.15, 0.20, 0.20, 0.15, 0.15, 0.15, 0.10, 0.12, 0.12, 0.20, 0.20
-    ], dtype=float)
+    return np.array([0.20, 0.15, 0.25, 0.20, 0.20, 0.20, 0.15, 0.15, 0.12, 0.12, 0.15, 0.12, 0.12, 0.20], dtype=float)
 
 
 def default_corr_eps_x() -> np.ndarray:
     corr = np.eye(len(X_KEYS), dtype=float)
     xi = {k: i for i, k in enumerate(X_KEYS)}
     pairs = {
-        ("LEFF", "LER"): 0.25,
-        ("RSD", "RCONTACT"): 0.20,
-        ("RCONTACT", "RVIA"): 0.20,
-        ("RWIRE_PER_L", "CWIRE_PER_L"): 0.10,
+        ("LEFF", "R_CORNER_EFF"): 0.20,
+        ("RSD_EFF", "RCONTACT_EFF"): 0.20,
+        ("RWIRE_EFF", "CWIRE_EFF"): 0.10,
+        ("T_LINER_EFF", "DH_STI_EFF"): 0.15,
     }
     for (a, b), v in pairs.items():
         i, j = xi[a], xi[b]
