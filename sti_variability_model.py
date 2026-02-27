@@ -21,7 +21,6 @@ Z_KEYS: Tuple[str, ...] = (
     "THERM",         # thermal budget / diffusion
     "CMP",           # CMP dishing / erosion tendency
     "STRESS",        # mechanical stress
-    "DEFECT",        # defect / trap density tendency
     "RCONT",         # contact resistance tendency
     "RINT",          # interconnect resistance tendency
     "CINT",          # interconnect capacitance tendency
@@ -129,7 +128,6 @@ def default_z_corr() -> np.ndarray:
         ("STRESS", "CD_G"): 0.15,
         ("RCONT", "RINT"): 0.25,
         ("RINT", "CINT"): 0.15,
-        ("DEFECT", "LER"): 0.25,
     }
     for (a, b), v in pairs.items():
         i, j = zi[a], zi[b]
@@ -191,8 +189,6 @@ def default_B_z_to_x() -> np.ndarray:
 
     B[xi["DH_STI_EFF"], zi["CMP"]] = 0.85
     B[xi["DH_STI_EFF"], zi["ETCH_RATE"]] = 0.15
-
-    B[xi["DEFECT_EFF"], zi["DEFECT"]] = 1.00
 
     return B
 
