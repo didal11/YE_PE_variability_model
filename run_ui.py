@@ -4,262 +4,214 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import numpy as np
 
-import sti_variability_model as sti
-
-
-def fill_example_A(A: np.ndarray) -> None:
-    """예시 계수: 나중에 네가 논문/피팅으로 교체할 자리"""
-    # index helper
-    xi = {k: i for i, k in enumerate(sti.STI_X_KEYS)}
-    pi = {k: i for i, k in enumerate(sti.P_KEYS)}
-
-    A[:] = 0.0
-    # DVTH [V]
-    A[pi["DVTH"], xi["W_STI"]]  = 2.0e-4   # V/nm
-    A[pi["DVTH"], xi["SIG_CH"]] = 1.0e-6   # V/MPa
-    A[pi["DVTH"], xi["DH_STI"]] = 5.0e-4   # V/nm
-
-    # DMU [-]
-    A[pi["DMU"], xi["SIG_CH"]]  = -5.0e-4  # 1/MPa
-    A[pi["DMU"], xi["W_STI"]]   =  1.0e-3  # 1/nm
-
-    # DCJD/DCJS [F]
-    A[pi["DCJD"], xi["R_CORNER"]] = -2.0e-18  # F/nm
-    A[pi["DCJS"], xi["R_CORNER"]] = -2.0e-18  # F/nm
-
-    # DLNIR* [-]
-    A[pi["DLNIRD"], xi["R_CORNER"]] = -0.02   # 1/nm
-    A[pi["DLNIRD"], xi["T_LINER"]]  = +1.0    # 1/nm
-    A[pi["DLNIRS"], xi["R_CORNER"]] = -0.02
-    A[pi["DLNIRS"], xi["T_LINER"]]  = +1.0
+import sti_variability_model as model
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("STI Variability → SPICE Parameter Covariance")
-        self.geometry("1100x700")
+        self.title("Tier1 z → x → p Variability Propagation")
+        self.geometry("1300x820")
 
-        self.nominal_entries = {}
-        self.delta_mu_entries = {}
-        self.sigma_entries = {}
-
-        self.A_entries = [[None]*len(sti.STI_X_KEYS) for _ in sti.P_KEYS]
+        self.mu_z_entries = {}
+        self.sigma_z_entries = {}
+        self.corr_z_entries = [[None] * len(model.Z_KEYS) for _ in model.Z_KEYS]
 
         self._build_ui()
+        self._fill_defaults()
 
     def _build_ui(self):
         main = ttk.Frame(self, padding=10)
         main.pack(fill="both", expand=True)
 
-        # ---- 좌측: 입력 ----
         left = ttk.Frame(main)
-        left.pack(side="left", fill="y")
+        left.pack(side="left", fill="both", expand=False)
 
-        # nominal/delta_mu/sigma 입력
-        box1 = ttk.LabelFrame(left, text="STI 공정변수 입력 (x_nom, Δμ, σ)  — 단위는 네 정의 그대로")
-        box1.pack(fill="x", pady=5)
+        right = ttk.Frame(main)
+        right.pack(side="right", fill="both", expand=True, padx=(10, 0))
 
-        grid = ttk.Frame(box1)
-        grid.pack()
+        self._build_z_input(left)
+        self._build_output(right)
 
-        ttk.Label(grid, text="변수").grid(row=0, column=0, padx=5, pady=2)
-        ttk.Label(grid, text="x_nom").grid(row=0, column=1, padx=5, pady=2)
-        ttk.Label(grid, text="Δμ").grid(row=0, column=2, padx=5, pady=2)
-        ttk.Label(grid, text="σ (1σ)").grid(row=0, column=3, padx=5, pady=2)
+    def _build_z_input(self, parent):
+        z_box = ttk.LabelFrame(parent, text="Tier1 z 입력 (평균 시프트 μz, 표준편차 σz, 상관계수 corr_z)")
+        z_box.pack(fill="both", expand=True)
 
-        # 기본값
-        defaults_nominal = {"D_STI":300.0, "W_STI":200.0, "R_CORNER":30.0, "SIG_CH":0.0, "T_LINER":5.0, "DH_STI":0.0}
-        defaults_delta = {k: 0.0 for k in sti.STI_X_KEYS}
-        defaults_sigma = {"D_STI":3.0, "W_STI":2.0, "R_CORNER":1.5, "SIG_CH":20.0, "T_LINER":0.2, "DH_STI":1.0}
+        top_grid = ttk.Frame(z_box)
+        top_grid.pack(fill="x", padx=6, pady=6)
 
-        for r, k in enumerate(sti.STI_X_KEYS, start=1):
-            ttk.Label(grid, text=k).grid(row=r, column=0, sticky="w", padx=5, pady=2)
-            e_nom = ttk.Entry(grid, width=12)
-            e_nom.insert(0, str(defaults_nominal.get(k, 0.0)))
-            e_nom.grid(row=r, column=1, padx=5, pady=2)
-            self.nominal_entries[k] = e_nom
+        ttk.Label(top_grid, text="z key").grid(row=0, column=0, padx=4, pady=2)
+        ttk.Label(top_grid, text="μz").grid(row=0, column=1, padx=4, pady=2)
+        ttk.Label(top_grid, text="σz").grid(row=0, column=2, padx=4, pady=2)
 
-            e_dmu = ttk.Entry(grid, width=12)
-            e_dmu.insert(0, str(defaults_delta.get(k, 0.0)))
-            e_dmu.grid(row=r, column=2, padx=5, pady=2)
-            self.delta_mu_entries[k] = e_dmu
+        for r, k in enumerate(model.Z_KEYS, start=1):
+            ttk.Label(top_grid, text=k).grid(row=r, column=0, padx=4, pady=1, sticky="w")
+            em = ttk.Entry(top_grid, width=8)
+            es = ttk.Entry(top_grid, width=8)
+            em.grid(row=r, column=1, padx=4, pady=1)
+            es.grid(row=r, column=2, padx=4, pady=1)
+            self.mu_z_entries[k] = em
+            self.sigma_z_entries[k] = es
 
-            e_si = ttk.Entry(grid, width=12)
-            e_si.insert(0, str(defaults_sigma.get(k, 1.0)))
-            e_si.grid(row=r, column=3, padx=5, pady=2)
-            self.sigma_entries[k] = e_si
+        corr_box = ttk.LabelFrame(z_box, text="corr_z (편집 가능, 대각=1 권장)")
+        corr_box.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # 상관 옵션(간단 버전: 독립)
-        self.use_independent = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            box1,
-            text="(현재 버전) 입력 변수들을 독립으로 가정 (corr=I)",
-            variable=self.use_independent
-        ).pack(anchor="w", padx=5, pady=5)
-
-        # A 매핑 입력
-        box2 = ttk.LabelFrame(left, text="STI x → SPICE 주입 파라미터 p 매핑 (선형) : p = A(x-μ)+b")
-        box2.pack(fill="both", expand=True, pady=5)
-
-        btnrow = ttk.Frame(box2)
-        btnrow.pack(fill="x", pady=3)
-        ttk.Button(btnrow, text="A 예시값 채우기", command=self._on_fill_A).pack(side="left", padx=5)
-        ttk.Button(btnrow, text="A 모두 0", command=self._on_zero_A).pack(side="left", padx=5)
-
-        canvas = tk.Canvas(box2, height=260)
+        canvas = tk.Canvas(corr_box, height=300)
         canvas.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(box2, orient="vertical", command=canvas.yview)
-        scroll.pack(side="right", fill="y")
-        canvas.configure(yscrollcommand=scroll.set)
+        yscroll = ttk.Scrollbar(corr_box, orient="vertical", command=canvas.yview)
+        yscroll.pack(side="right", fill="y")
+        xscroll = ttk.Scrollbar(corr_box, orient="horizontal", command=canvas.xview)
+        xscroll.pack(side="bottom", fill="x")
+        canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
 
         inner = ttk.Frame(canvas)
         canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        # 헤더
-        ttk.Label(inner, text="p \\ x").grid(row=0, column=0, padx=4, pady=2, sticky="w")
-        for c, xk in enumerate(sti.STI_X_KEYS, start=1):
-            ttk.Label(inner, text=xk).grid(row=0, column=c, padx=4, pady=2)
+        ttk.Label(inner, text="corr").grid(row=0, column=0, padx=2, pady=2)
+        for c, key in enumerate(model.Z_KEYS, start=1):
+            ttk.Label(inner, text=key, width=10).grid(row=0, column=c, padx=1, pady=1)
+            ttk.Label(inner, text=key, width=10).grid(row=c, column=0, padx=1, pady=1, sticky="w")
 
-        for r, pk in enumerate(sti.P_KEYS, start=1):
-            ttk.Label(inner, text=pk).grid(row=r, column=0, padx=4, pady=2, sticky="w")
-            for c, xk in enumerate(sti.STI_X_KEYS, start=1):
-                e = ttk.Entry(inner, width=10)
-                e.insert(0, "0")
-                e.grid(row=r, column=c, padx=3, pady=2)
-                self.A_entries[r-1][c-1] = e
+        for r in range(len(model.Z_KEYS)):
+            for c in range(len(model.Z_KEYS)):
+                e = ttk.Entry(inner, width=6)
+                e.grid(row=r + 1, column=c + 1, padx=1, pady=1)
+                self.corr_z_entries[r][c] = e
 
-        def _on_configure(_):
+        def _on_cfg(_):
             canvas.configure(scrollregion=canvas.bbox("all"))
-        inner.bind("<Configure>", _on_configure)
 
-        # ---- 우측: 출력 ----
-        right = ttk.Frame(main)
-        right.pack(side="right", fill="both", expand=True, padx=(10,0))
+        inner.bind("<Configure>", _on_cfg)
 
-        outbox = ttk.LabelFrame(right, text="출력 (Σp, σp, corr_p)")
-        outbox.pack(fill="both", expand=True)
+    def _build_output(self, parent):
+        out_box = ttk.LabelFrame(parent, text="결과")
+        out_box.pack(fill="both", expand=True)
 
-        self.output = tk.Text(outbox, wrap="none")
+        self.output = tk.Text(out_box, wrap="none")
         self.output.pack(fill="both", expand=True)
 
-        # 하단 버튼
-        bot = ttk.Frame(right)
-        bot.pack(fill="x", pady=8)
+        btn = ttk.Frame(parent)
+        btn.pack(fill="x", pady=8)
+        ttk.Button(btn, text="기본값 다시 채우기", command=self._fill_defaults).pack(side="left", padx=5)
+        ttk.Button(btn, text="계산", command=self._on_calc).pack(side="left", padx=5)
+        ttk.Button(btn, text="p 샘플 1개 + .inc 저장", command=self._on_save_sample).pack(side="left", padx=5)
+        ttk.Button(btn, text="출력 지우기", command=lambda: self.output.delete("1.0", "end")).pack(side="right", padx=5)
 
-        ttk.Button(bot, text="계산", command=self._on_calc).pack(side="left", padx=5)
-        ttk.Button(bot, text="샘플 1개 생성 + .inc 저장", command=self._on_save_sample).pack(side="left", padx=5)
-        ttk.Button(bot, text="출력 지우기", command=lambda: self.output.delete("1.0", "end")).pack(side="right", padx=5)
+    def _fill_defaults(self):
+        mu_z = model.default_mu_z()
+        sigma_z = model.default_sigma_z()
+        corr_z = model.default_z_corr()
 
-    def _read_shift_inputs(self):
-        nominal = []
-        delta_mu = []
-        sig = []
-        for k in sti.STI_X_KEYS:
+        for i, k in enumerate(model.Z_KEYS):
+            self.mu_z_entries[k].delete(0, "end")
+            self.mu_z_entries[k].insert(0, f"{mu_z[i]:.6g}")
+            self.sigma_z_entries[k].delete(0, "end")
+            self.sigma_z_entries[k].insert(0, f"{sigma_z[i]:.6g}")
+
+        for r in range(len(model.Z_KEYS)):
+            for c in range(len(model.Z_KEYS)):
+                self.corr_z_entries[r][c].delete(0, "end")
+                self.corr_z_entries[r][c].insert(0, f"{corr_z[r, c]:.4g}")
+
+    def _read_z_spec(self):
+        mu_z = []
+        sigma_z = []
+        for k in model.Z_KEYS:
             try:
-                nominal.append(float(self.nominal_entries[k].get()))
-                delta_mu.append(float(self.delta_mu_entries[k].get()))
-                sig.append(float(self.sigma_entries[k].get()))
+                mu_z.append(float(self.mu_z_entries[k].get()))
+                sigma_z.append(float(self.sigma_z_entries[k].get()))
             except ValueError:
-                raise ValueError(f"{k}의 x_nom/Δμ/σ 입력이 숫자가 아님")
-        nominal = np.array(nominal, dtype=float)
-        delta_mu = np.array(delta_mu, dtype=float)
-        sig = np.array(sig, dtype=float)
-        if np.any(sig < 0):
-            raise ValueError("σ는 음수일 수 없음")
-        return nominal, delta_mu, sig
+                raise ValueError(f"{k}의 μz/σz 입력이 숫자가 아님")
 
-    def _read_A(self):
-        A = np.zeros((len(sti.P_KEYS), len(sti.STI_X_KEYS)), dtype=float)
-        for r in range(len(sti.P_KEYS)):
-            for c in range(len(sti.STI_X_KEYS)):
+        mu_z = np.array(mu_z, dtype=float)
+        sigma_z = np.array(sigma_z, dtype=float)
+        if np.any(sigma_z < 0):
+            raise ValueError("σz는 음수일 수 없음")
+
+        n = len(model.Z_KEYS)
+        corr_z = np.zeros((n, n), dtype=float)
+        for r in range(n):
+            for c in range(n):
                 try:
-                    A[r, c] = float(self.A_entries[r][c].get())
+                    corr_z[r, c] = float(self.corr_z_entries[r][c].get())
                 except ValueError:
-                    raise ValueError(f"A[{sti.P_KEYS[r]},{sti.STI_X_KEYS[c]}]가 숫자가 아님")
-        return A
+                    raise ValueError("corr_z 입력 중 숫자가 아닌 값이 있음")
 
-    def _on_fill_A(self):
-        A = np.zeros((len(sti.P_KEYS), len(sti.STI_X_KEYS)), dtype=float)
-        fill_example_A(A)
-        for r in range(len(sti.P_KEYS)):
-            for c in range(len(sti.STI_X_KEYS)):
-                self.A_entries[r][c].delete(0, "end")
-                self.A_entries[r][c].insert(0, f"{A[r,c]:.6g}")
+        if not np.allclose(corr_z, corr_z.T, atol=1e-10):
+            raise ValueError("corr_z는 대칭이어야 함")
+        if not np.allclose(np.diag(corr_z), np.ones(n), atol=1e-8):
+            raise ValueError("corr_z 대각성분은 1이어야 함")
 
-    def _on_zero_A(self):
-        for r in range(len(sti.P_KEYS)):
-            for c in range(len(sti.STI_X_KEYS)):
-                self.A_entries[r][c].delete(0, "end")
-                self.A_entries[r][c].insert(0, "0")
+        Sigma_z = model.make_Sigma_from_sigma_and_corr(sigma_z, corr_z)
+        return model.GaussianSpec(mu=mu_z, Sigma=Sigma_z), sigma_z, corr_z
+
+    def _compute_all(self):
+        spec_z, sigma_z, corr_z = self._read_z_spec()
+
+        B = model.default_B_z_to_x()
+        A = model.default_A_x_to_p()
+
+        mu_eps_x = model.default_mu_eps_x()
+        sigma_eps_x = model.default_sigma_eps_x()
+        corr_eps_x = model.default_corr_eps_x()
+        Sigma_eps_x = model.make_Sigma_from_sigma_and_corr(sigma_eps_x, corr_eps_x)
+        spec_eps_x = model.GaussianSpec(mu=mu_eps_x, Sigma=Sigma_eps_x)
+
+        mu_x, Sigma_x = model.build_x_from_z(spec_z, B, spec_eps_x)
+        sigma_x, corr_x = model.covariance_to_sigma_and_corr(Sigma_x)
+
+        spec_x = model.GaussianSpec(mu=mu_x, Sigma=Sigma_x)
+        mu_p, Sigma_p = model.propagate_linear(spec_x, A=A, b=np.zeros((len(model.P_KEYS),), dtype=float), in_keys=model.X_KEYS, out_keys=model.P_KEYS)
+        sigma_p, corr_p = model.covariance_to_sigma_and_corr(Sigma_p)
+
+        return {
+            "mu_z": spec_z.mu,
+            "sigma_z": sigma_z,
+            "corr_z": corr_z,
+            "mu_x": mu_x,
+            "sigma_x": sigma_x,
+            "corr_x": corr_x,
+            "mu_p": mu_p,
+            "sigma_p": sigma_p,
+            "corr_p": corr_p,
+            "Sigma_p": Sigma_p,
+        }
 
     def _on_calc(self):
         try:
-            x_nom, delta_mu_x, sigma_x = self._read_shift_inputs()
+            r = self._compute_all()
+            self.output.insert("end", "=== 입력 z ===\n")
+            self.output.insert("end", f"keys: {model.Z_KEYS}\n")
+            self.output.insert("end", f"mu_z: {r['mu_z']}\n")
+            self.output.insert("end", f"sigma_z: {r['sigma_z']}\n")
+            self.output.insert("end", f"corr_z:\n{r['corr_z']}\n\n")
 
-            if self.use_independent.get():
-                corr_x = np.eye(len(sti.STI_X_KEYS), dtype=float)
-            else:
-                corr_x = np.eye(len(sti.STI_X_KEYS), dtype=float)  # (확장 예정)
-            Sigma_x = sti.make_Sigma_from_sigma_and_corr(sigma_x, corr_x)
+            self.output.insert("end", "=== 계산된 x (평균 시프트 / 표준편차) ===\n")
+            for k, m, s in zip(model.X_KEYS, r["mu_x"], r["sigma_x"]):
+                self.output.insert("end", f"{k:14s}  mu={m: .6g}  sigma={s: .6g}\n")
+            self.output.insert("end", f"\ncorr_x:\n{r['corr_x']}\n\n")
 
-            A = self._read_A()
-            spec_x = sti.GaussianSpec(mu=delta_mu_x, Sigma=Sigma_x)
-            lm = sti.LinearMap(A=A, b=np.zeros((len(sti.P_KEYS),), dtype=float))
-
-            mu_p, Sigma_p = sti.propagate_covariance(spec_x, lm)
-            sigma_p, corr_p = sti.covariance_to_sigma_and_corr(Sigma_p)
-
-            self.output.insert("end", "=== 입력 x ===\n")
-            self.output.insert("end", f"keys: {sti.STI_X_KEYS}\n")
-            self.output.insert("end", f"x_nom: {x_nom}\n")
-            self.output.insert("end", f"delta_mu_x: {delta_mu_x}\n")
-            self.output.insert("end", f"x_mean (= x_nom + delta_mu_x): {x_nom + delta_mu_x}\n")
-            self.output.insert("end", f"sigma_x: {sigma_x}\n\n")
-
-            self.output.insert("end", "=== 출력 p (SPICE 주입 파라미터) ===\n")
-            self.output.insert("end", f"keys: {sti.P_KEYS}\n")
-            self.output.insert("end", f"delta_mu_p: {mu_p}\n\n")
-
-            self.output.insert("end", "=== Sigma_p (공분산, 교차기여 포함) ===\n")
-            self.output.insert("end", f"{Sigma_p}\n\n")
-
-            self.output.insert("end", "=== sigma_p (1σ) ===\n")
-            for k, s in zip(sti.P_KEYS, sigma_p):
-                self.output.insert("end", f"{k}: {s:.6g}\n")
-            self.output.insert("end", "\n=== corr_p ===\n")
-            self.output.insert("end", f"{corr_p}\n\n")
+            self.output.insert("end", "=== 계산된 p (평균 시프트 / 표준편차) ===\n")
+            for k, m, s in zip(model.P_KEYS, r["mu_p"], r["sigma_p"]):
+                self.output.insert("end", f"{k:14s}  mu={m: .6g}  sigma={s: .6g}\n")
+            self.output.insert("end", f"\nSigma_p:\n{r['Sigma_p']}\n")
+            self.output.insert("end", f"\ncorr_p:\n{r['corr_p']}\n\n")
 
         except Exception as e:
             messagebox.showerror("오류", str(e))
 
     def _on_save_sample(self):
         try:
-            # 먼저 계산 수행해서 Sigma_p 필요
-            _, delta_mu_x, sigma_x = self._read_shift_inputs()
-            corr_x = np.eye(len(sti.STI_X_KEYS), dtype=float)
-            Sigma_x = sti.make_Sigma_from_sigma_and_corr(sigma_x, corr_x)
-
-            A = self._read_A()
-            spec_x = sti.GaussianSpec(mu=delta_mu_x, Sigma=Sigma_x)
-            lm = sti.LinearMap(A=A, b=np.zeros((len(sti.P_KEYS),), dtype=float))
-
-            mu_p, Sigma_p = sti.propagate_covariance(spec_x, lm)
-
-            # 샘플 1개
-            p = sti.sample_mvnormal(mu=mu_p, Sigma=Sigma_p, n=1, seed=None)[0]
-
-            # 저장 경로
+            r = self._compute_all()
+            p = model.sample_mvnormal(mu=r["mu_p"], Sigma=model.make_Sigma_from_sigma_and_corr(r["sigma_p"], r["corr_p"]), n=1, seed=None)[0]
             path = filedialog.asksaveasfilename(
                 defaultextension=".inc",
-                filetypes=[("SPICE include", "*.inc"), ("All files", "*.*")]
+                filetypes=[("SPICE include", "*.inc"), ("All files", "*.*")],
             )
             if not path:
                 return
-
-            sti.write_spice_param_include(path, p, header="sti sample params")
+            model.write_spice_param_include(path, p, header="tier1 z->x->p sample")
             messagebox.showinfo("저장 완료", f"저장됨: {path}")
-
         except Exception as e:
             messagebox.showerror("오류", str(e))
 
