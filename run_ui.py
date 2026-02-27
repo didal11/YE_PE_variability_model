@@ -40,7 +40,8 @@ class App(tk.Tk):
         self.title("STI Variability → SPICE Parameter Covariance")
         self.geometry("1100x700")
 
-        self.mu_entries = {}
+        self.nominal_entries = {}
+        self.delta_mu_entries = {}
         self.sigma_entries = {}
 
         self.A_entries = [[None]*len(sti.STI_X_KEYS) for _ in sti.P_KEYS]
@@ -55,31 +56,38 @@ class App(tk.Tk):
         left = ttk.Frame(main)
         left.pack(side="left", fill="y")
 
-        # mu/sigma 입력
-        box1 = ttk.LabelFrame(left, text="STI 공정변수 입력 (μ, σ)  — 단위는 네 정의 그대로")
+        # nominal/delta_mu/sigma 입력
+        box1 = ttk.LabelFrame(left, text="STI 공정변수 입력 (x_nom, Δμ, σ)  — 단위는 네 정의 그대로")
         box1.pack(fill="x", pady=5)
 
         grid = ttk.Frame(box1)
         grid.pack()
 
         ttk.Label(grid, text="변수").grid(row=0, column=0, padx=5, pady=2)
-        ttk.Label(grid, text="μ").grid(row=0, column=1, padx=5, pady=2)
-        ttk.Label(grid, text="σ (1σ)").grid(row=0, column=2, padx=5, pady=2)
+        ttk.Label(grid, text="x_nom").grid(row=0, column=1, padx=5, pady=2)
+        ttk.Label(grid, text="Δμ").grid(row=0, column=2, padx=5, pady=2)
+        ttk.Label(grid, text="σ (1σ)").grid(row=0, column=3, padx=5, pady=2)
 
         # 기본값
-        defaults_mu = {"D_STI":300.0, "W_STI":200.0, "R_CORNER":30.0, "SIG_CH":0.0, "T_LINER":5.0, "DH_STI":0.0}
+        defaults_nominal = {"D_STI":300.0, "W_STI":200.0, "R_CORNER":30.0, "SIG_CH":0.0, "T_LINER":5.0, "DH_STI":0.0}
+        defaults_delta = {k: 0.0 for k in sti.STI_X_KEYS}
         defaults_sigma = {"D_STI":3.0, "W_STI":2.0, "R_CORNER":1.5, "SIG_CH":20.0, "T_LINER":0.2, "DH_STI":1.0}
 
         for r, k in enumerate(sti.STI_X_KEYS, start=1):
             ttk.Label(grid, text=k).grid(row=r, column=0, sticky="w", padx=5, pady=2)
-            e_mu = ttk.Entry(grid, width=12)
-            e_mu.insert(0, str(defaults_mu.get(k, 0.0)))
-            e_mu.grid(row=r, column=1, padx=5, pady=2)
-            self.mu_entries[k] = e_mu
+            e_nom = ttk.Entry(grid, width=12)
+            e_nom.insert(0, str(defaults_nominal.get(k, 0.0)))
+            e_nom.grid(row=r, column=1, padx=5, pady=2)
+            self.nominal_entries[k] = e_nom
+
+            e_dmu = ttk.Entry(grid, width=12)
+            e_dmu.insert(0, str(defaults_delta.get(k, 0.0)))
+            e_dmu.grid(row=r, column=2, padx=5, pady=2)
+            self.delta_mu_entries[k] = e_dmu
 
             e_si = ttk.Entry(grid, width=12)
             e_si.insert(0, str(defaults_sigma.get(k, 1.0)))
-            e_si.grid(row=r, column=2, padx=5, pady=2)
+            e_si.grid(row=r, column=3, padx=5, pady=2)
             self.sigma_entries[k] = e_si
 
         # 상관 옵션(간단 버전: 독립)
@@ -143,20 +151,23 @@ class App(tk.Tk):
         ttk.Button(bot, text="샘플 1개 생성 + .inc 저장", command=self._on_save_sample).pack(side="left", padx=5)
         ttk.Button(bot, text="출력 지우기", command=lambda: self.output.delete("1.0", "end")).pack(side="right", padx=5)
 
-    def _read_mu_sigma(self):
-        mu = []
+    def _read_shift_inputs(self):
+        nominal = []
+        delta_mu = []
         sig = []
         for k in sti.STI_X_KEYS:
             try:
-                mu.append(float(self.mu_entries[k].get()))
+                nominal.append(float(self.nominal_entries[k].get()))
+                delta_mu.append(float(self.delta_mu_entries[k].get()))
                 sig.append(float(self.sigma_entries[k].get()))
             except ValueError:
-                raise ValueError(f"{k}의 μ/σ 입력이 숫자가 아님")
-        mu = np.array(mu, dtype=float)
+                raise ValueError(f"{k}의 x_nom/Δμ/σ 입력이 숫자가 아님")
+        nominal = np.array(nominal, dtype=float)
+        delta_mu = np.array(delta_mu, dtype=float)
         sig = np.array(sig, dtype=float)
         if np.any(sig < 0):
             raise ValueError("σ는 음수일 수 없음")
-        return mu, sig
+        return nominal, delta_mu, sig
 
     def _read_A(self):
         A = np.zeros((len(sti.P_KEYS), len(sti.STI_X_KEYS)), dtype=float)
@@ -184,7 +195,7 @@ class App(tk.Tk):
 
     def _on_calc(self):
         try:
-            mu_x, sigma_x = self._read_mu_sigma()
+            x_nom, delta_mu_x, sigma_x = self._read_shift_inputs()
 
             if self.use_independent.get():
                 corr_x = np.eye(len(sti.STI_X_KEYS), dtype=float)
@@ -193,7 +204,7 @@ class App(tk.Tk):
             Sigma_x = sti.make_Sigma_from_sigma_and_corr(sigma_x, corr_x)
 
             A = self._read_A()
-            spec_x = sti.GaussianSpec(mu=mu_x, Sigma=Sigma_x)
+            spec_x = sti.GaussianSpec(mu=delta_mu_x, Sigma=Sigma_x)
             lm = sti.LinearMap(A=A, b=np.zeros((len(sti.P_KEYS),), dtype=float))
 
             mu_p, Sigma_p = sti.propagate_covariance(spec_x, lm)
@@ -201,12 +212,14 @@ class App(tk.Tk):
 
             self.output.insert("end", "=== 입력 x ===\n")
             self.output.insert("end", f"keys: {sti.STI_X_KEYS}\n")
-            self.output.insert("end", f"mu_x: {mu_x}\n")
+            self.output.insert("end", f"x_nom: {x_nom}\n")
+            self.output.insert("end", f"delta_mu_x: {delta_mu_x}\n")
+            self.output.insert("end", f"x_mean (= x_nom + delta_mu_x): {x_nom + delta_mu_x}\n")
             self.output.insert("end", f"sigma_x: {sigma_x}\n\n")
 
             self.output.insert("end", "=== 출력 p (SPICE 주입 파라미터) ===\n")
             self.output.insert("end", f"keys: {sti.P_KEYS}\n")
-            self.output.insert("end", f"mu_p (오프셋): {mu_p}\n\n")
+            self.output.insert("end", f"delta_mu_p: {mu_p}\n\n")
 
             self.output.insert("end", "=== Sigma_p (공분산, 교차기여 포함) ===\n")
             self.output.insert("end", f"{Sigma_p}\n\n")
@@ -223,12 +236,12 @@ class App(tk.Tk):
     def _on_save_sample(self):
         try:
             # 먼저 계산 수행해서 Sigma_p 필요
-            mu_x, sigma_x = self._read_mu_sigma()
+            _, delta_mu_x, sigma_x = self._read_shift_inputs()
             corr_x = np.eye(len(sti.STI_X_KEYS), dtype=float)
             Sigma_x = sti.make_Sigma_from_sigma_and_corr(sigma_x, corr_x)
 
             A = self._read_A()
-            spec_x = sti.GaussianSpec(mu=mu_x, Sigma=Sigma_x)
+            spec_x = sti.GaussianSpec(mu=delta_mu_x, Sigma=Sigma_x)
             lm = sti.LinearMap(A=A, b=np.zeros((len(sti.P_KEYS),), dtype=float))
 
             mu_p, Sigma_p = sti.propagate_covariance(spec_x, lm)
