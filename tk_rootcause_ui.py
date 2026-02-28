@@ -80,7 +80,6 @@ class App(tk.Tk):
         self.top_path = tk.StringVar(value="nmos_test.spice")
 
         self.mm_on = tk.BooleanVar(value=True)
-        self.np_split = tk.BooleanVar(value=False)
 
         self.runs = tk.IntVar(value=200)
         self.seed = tk.IntVar(value=1)
@@ -92,11 +91,6 @@ class App(tk.Tk):
             "X_eot": Dist(0.0, 1.0),
             "X_act": Dist(0.0, 1.0),
             "X_rc": Dist(0.0, 2.0),
-        }
-
-        self.sens_defaults = {
-            "a_dlc":"1e-9","a_dwc":"0.0","a_toxe":"1e-2","a_vth":"2e-2",
-            "a_u0":"5e-4","a_nf":"2e-2","a_voff":"1e-2","a_rdsw":"1e2"
         }
 
         self._build_ui()
@@ -130,7 +124,6 @@ class App(tk.Tk):
         swfrm.pack(fill="x", pady=10)
 
         ttk.Checkbutton(swfrm, text="mm(로컬 mismatch) ON", variable=self.mm_on).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(swfrm, text="n/p 계수 분리(NP_SPLIT)", variable=self.np_split).grid(row=0, column=1, sticky="w", padx=20)
 
         ttk.Label(swfrm, text="runs").grid(row=1, column=0, sticky="w")
         ttk.Entry(swfrm, textvariable=self.runs, width=10).grid(row=1, column=0, sticky="e", padx=6)
@@ -160,33 +153,14 @@ class App(tk.Tk):
             ttk.Label(distfrm, text="sigma%").grid(row=r, column=3, sticky="e")
             ttk.Entry(distfrm, textvariable=sg, width=10).grid(row=r, column=4, padx=4)
             r += 1
+        placeholder = ttk.LabelFrame(right, text="Reserved (k_* UI 예정)", padding=10)
+        placeholder.pack(fill="both", expand=True)
+        ttk.Label(
+            placeholder,
+            text="민감도 입력 영역은 비워두었습니다.\n추후 다른 UI를 이 영역에 추가할 예정입니다.",
+            justify="left",
+        ).pack(anchor="w")
 
-        sensfrm = ttk.LabelFrame(right, text="민감도 a_* (파인튜닝)", padding=10)
-        sensfrm.pack(fill="both", expand=True)
-
-        labels = ["a_dlc","a_dwc","a_toxe","a_vth","a_u0","a_nf","a_voff","a_rdsw"]
-
-        ttk.Label(sensfrm, text="기본 a_* (NP_SPLIT=0일 때)").grid(row=0, column=0, columnspan=4, sticky="w")
-        self.sens_vars={}
-        for i,k in enumerate(labels):
-            v=tk.StringVar(value=self.sens_defaults[k])
-            self.sens_vars[k]=v
-            ttk.Label(sensfrm, text=k).grid(row=1+i//2, column=(i%2)*2, sticky="e", pady=2)
-            ttk.Entry(sensfrm, textvariable=v, width=14).grid(row=1+i//2, column=(i%2)*2+1, padx=6, pady=2, sticky="w")
-
-        npfrm = ttk.LabelFrame(right, text="n/p 분리 계수 (NP_SPLIT=1일 때)", padding=10)
-        npfrm.pack(fill="both", expand=True, pady=10)
-        self.sensn_vars={}; self.sensp_vars={}
-        ttk.Label(npfrm, text="nMOS").grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(npfrm, text="pMOS").grid(row=0, column=2, columnspan=2, sticky="w")
-        for i,k in enumerate(labels):
-            vn=tk.StringVar(value=self.sens_defaults[k])
-            vp=tk.StringVar(value=self.sens_defaults[k])
-            self.sensn_vars[k]=vn; self.sensp_vars[k]=vp
-            ttk.Label(npfrm, text=k).grid(row=1+i, column=0, sticky="e", pady=1)
-            ttk.Entry(npfrm, textvariable=vn, width=14).grid(row=1+i, column=1, padx=6, pady=1, sticky="w")
-            ttk.Label(npfrm, text=k).grid(row=1+i, column=2, sticky="e", pady=1)
-            ttk.Entry(npfrm, textvariable=vp, width=14).grid(row=1+i, column=3, padx=6, pady=1, sticky="w")
 
         btnfrm = ttk.Frame(frm); btnfrm.pack(fill="x", pady=10)
         ttk.Button(btnfrm, text="코너 1개 생성(현재 mean 값)", command=self.make_one).pack(side="left")
@@ -215,24 +189,12 @@ class App(tk.Tk):
     def _collect_values(self, sample: dict) -> dict:
         vals = {
             "MC_MM_SWITCH": "1" if self.mm_on.get() else "0",
-            "NP_SPLIT": "1" if self.np_split.get() else "0",
             "X_cd": f"{sample['X_cd']:.12g}",
             "X_damage": f"{sample['X_damage']:.12g}",
             "X_eot": f"{sample['X_eot']:.12g}",
             "X_act": f"{sample['X_act']:.12g}",
             "X_rc": f"{sample['X_rc']:.12g}",
         }
-        for k,v in self.sens_vars.items():
-            vals[k]=v.get().strip()
-        if self.np_split.get():
-            for k,v in self.sensn_vars.items():
-                vals[k+"_n"]=v.get().strip()
-            for k,v in self.sensp_vars.items():
-                vals[k+"_p"]=v.get().strip()
-        else:
-            for k in self.sensn_vars.keys():
-                vals[k+"_n"]="0"
-                vals[k+"_p"]="0"
         return vals
 
     def make_one(self):
