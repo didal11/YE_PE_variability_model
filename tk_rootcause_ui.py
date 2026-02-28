@@ -29,6 +29,26 @@ from tkinter import ttk, messagebox, filedialog
 BEGIN = "* === ROOTCAUSE_UI_BEGIN ==="
 END   = "* === ROOTCAUSE_UI_END ==="
 
+X_NAMES = ("cd", "damage", "eot", "act", "rc")
+COMPARE_PARAM_SPECS = [
+    ("NFET dlc_diff", "sky130_fd_pr__nfet_01v8__dlc_diff", "diff", "k_nfet_dlc_diff"),
+    ("NFET dwc_diff", "sky130_fd_pr__nfet_01v8__dwc_diff", "diff", "k_nfet_dwc_diff"),
+    ("NFET lint_diff", "sky130_fd_pr__nfet_01v8__lint_diff", "diff", "k_nfet_lint_diff"),
+    ("NFET overlap_mult", "sky130_fd_pr__nfet_01v8__overlap_mult", "mult", "k_nfet_overlap_mult"),
+    ("NFET rshn_mult", "sky130_fd_pr__nfet_01v8__rshn_mult", "mult", "k_nfet_rshn_mult"),
+    ("NFET toxe_mult", "sky130_fd_pr__nfet_01v8__toxe_mult", "mult", "k_nfet_toxe_mult"),
+    ("NFET wint_diff", "sky130_fd_pr__nfet_01v8__wint_diff", "diff", "k_nfet_wint_diff"),
+    ("PFET ajunction_mult", "sky130_fd_pr__pfet_01v8__ajunction_mult", "mult", "k_pfet_ajunction_mult"),
+    ("PFET dlc_diff", "sky130_fd_pr__pfet_01v8__dlc_diff", "diff", "k_pfet_dlc_diff"),
+    ("PFET dwc_diff", "sky130_fd_pr__pfet_01v8__dwc_diff", "diff", "k_pfet_dwc_diff"),
+    ("PFET lint_diff", "sky130_fd_pr__pfet_01v8__lint_diff", "diff", "k_pfet_lint_diff"),
+    ("PFET overlap_mult", "sky130_fd_pr__pfet_01v8__overlap_mult", "mult", "k_pfet_overlap_mult"),
+    ("PFET pjunction_mult", "sky130_fd_pr__pfet_01v8__pjunction_mult", "mult", "k_pfet_pjunction_mult"),
+    ("PFET rshp_mult", "sky130_fd_pr__pfet_01v8__rshp_mult", "mult", "k_pfet_rshp_mult"),
+    ("PFET toxe_mult", "sky130_fd_pr__pfet_01v8__toxe_mult", "mult", "k_pfet_toxe_mult"),
+    ("PFET wint_diff", "sky130_fd_pr__pfet_01v8__wint_diff", "diff", "k_pfet_wint_diff"),
+]
+
 def pct_to_frac(x_pct: float) -> float:
     return x_pct/100.0
 
@@ -44,6 +64,33 @@ def split_rootcause_block(txt: str) -> tuple[str,str,str]:
     pre, rest = txt.split(BEGIN, 1)
     mid, post = rest.split(END, 1)
     return pre, mid, post
+
+def parse_numeric_params(spice_txt: str) -> dict[str, float]:
+    params: dict[str, float] = {}
+    in_param_block = False
+
+    def parse_assign(chunk: str) -> None:
+        m = re.match(r"^([A-Za-z0-9_]+)\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*$", chunk)
+        if not m:
+            return
+        params[m.group(1)] = float(m.group(2))
+
+    for raw in spice_txt.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("*"):
+            continue
+        if line.startswith(".param"):
+            rest = line[len(".param"):].strip()
+            in_param_block = not bool(rest)
+            if rest:
+                parse_assign(rest)
+            continue
+        if in_param_block and line.startswith("+"):
+            parse_assign(line[1:].strip())
+            continue
+        in_param_block = False
+
+    return params
 
 def render_corner(base_path: Path, overlay_path: Path, out_path: Path, values: dict) -> None:
     base_txt = base_path.read_text(encoding="utf-8", errors="ignore").rstrip() + "\n\n"
@@ -153,13 +200,30 @@ class App(tk.Tk):
             ttk.Label(distfrm, text="sigma%").grid(row=r, column=3, sticky="e")
             ttk.Entry(distfrm, textvariable=sg, width=10).grid(row=r, column=4, padx=4)
             r += 1
-        placeholder = ttk.LabelFrame(right, text="Reserved (k_* UI 예정)", padding=10)
-        placeholder.pack(fill="both", expand=True)
+        comparefrm = ttk.LabelFrame(right, text="Base vs Root-cause 비교(현재 mean 기준)", padding=10)
+        comparefrm.pack(fill="both", expand=True)
         ttk.Label(
-            placeholder,
-            text="민감도 입력 영역은 비워두었습니다.\n추후 다른 UI를 이 영역에 추가할 예정입니다.",
+            comparefrm,
+            text="X mean%를 기준으로 예상 갱신값을 계산해 비교합니다.\n(실제 시뮬레이터 최종값과 다를 수 있음)",
             justify="left",
         ).pack(anchor="w")
+        ttk.Button(comparefrm, text="비교표 갱신", command=self.refresh_compare_table).pack(anchor="w", pady=(6, 8))
+
+        cols = ("param", "base", "updated", "delta")
+        self.compare_tree = ttk.Treeview(comparefrm, columns=cols, show="headings", height=16)
+        self.compare_tree.heading("param", text="Parameter")
+        self.compare_tree.heading("base", text="Base")
+        self.compare_tree.heading("updated", text="Root-cause")
+        self.compare_tree.heading("delta", text="Delta")
+        self.compare_tree.column("param", width=290, anchor="w")
+        self.compare_tree.column("base", width=95, anchor="e")
+        self.compare_tree.column("updated", width=95, anchor="e")
+        self.compare_tree.column("delta", width=95, anchor="e")
+        self.compare_tree.pack(fill="both", expand=True)
+
+        yscroll = ttk.Scrollbar(comparefrm, orient="vertical", command=self.compare_tree.yview)
+        self.compare_tree.configure(yscrollcommand=yscroll.set)
+        yscroll.place(relx=1.0, rely=0.24, relheight=0.76, anchor="ne")
 
 
         btnfrm = ttk.Frame(frm); btnfrm.pack(fill="x", pady=10)
@@ -169,6 +233,7 @@ class App(tk.Tk):
 
         self.status = tk.StringVar(value="준비됨")
         ttk.Label(frm, textvariable=self.status).pack(fill="x")
+        self.refresh_compare_table()
 
     def _browse_base(self):
         p = filedialog.askopenfilename(title="Select base corner spice", filetypes=[("SPICE","*.spice"),("All","*.*")])
@@ -197,6 +262,42 @@ class App(tk.Tk):
         }
         return vals
 
+    def _current_mean_sample(self) -> dict[str, float]:
+        return {k: pct_to_frac(self.dist_vars[k][0].get()) for k in self.dist_vars}
+
+    def refresh_compare_table(self):
+        try:
+            base = Path(self.base_path.get()).resolve()
+            overlay = Path(self.overlay_path.get()).resolve()
+            if not base.exists() or not overlay.exists():
+                return
+
+            base_params = parse_numeric_params(base.read_text(encoding="utf-8", errors="ignore"))
+            overlay_txt = overlay.read_text(encoding="utf-8", errors="ignore")
+            _, inner, _ = split_rootcause_block(overlay_txt)
+            k_params = parse_numeric_params(inner)
+            sample = self._current_mean_sample()
+
+            for iid in self.compare_tree.get_children():
+                self.compare_tree.delete(iid)
+
+            for label, p_name, mode, k_prefix in COMPARE_PARAM_SPECS:
+                if p_name not in base_params:
+                    continue
+                base_v = base_params[p_name]
+                shift = 0.0
+                for xn in X_NAMES:
+                    shift += k_params.get(f"{k_prefix}_{xn}", 0.0) * sample[f"X_{xn}"]
+                new_v = base_v + shift if mode == "diff" else base_v * (1.0 + shift)
+                delta = new_v - base_v
+                self.compare_tree.insert(
+                    "", "end",
+                    values=(label, f"{base_v:.6g}", f"{new_v:.6g}", f"{delta:+.6g}")
+                )
+            self.status.set("비교표 갱신 완료 (현재 mean 기준)")
+        except Exception as e:
+            messagebox.showerror("오류", f"비교표 갱신 실패: {e}")
+
     def make_one(self):
         try:
             base = Path(self.base_path.get()).resolve()
@@ -208,8 +309,9 @@ class App(tk.Tk):
             if not overlay.exists():
                 messagebox.showerror("오류", f"overlay 파일 없음: {overlay}")
                 return
-            sample = {k: pct_to_frac(self.dist_vars[k][0].get()) for k in self.dist_vars}
+            sample = self._current_mean_sample()
             render_corner(base, overlay, out_corner, self._collect_values(sample))
+            self.refresh_compare_table()
             self.status.set(f"코너 생성 완료: {out_corner}")
             messagebox.showinfo("완료", f"코너 생성 완료:\n{out_corner}")
         except Exception as e:
