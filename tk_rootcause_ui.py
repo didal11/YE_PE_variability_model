@@ -4,10 +4,10 @@
 """
 tk_rootcause_ui.py
 ==================
-- spice.zip 불필요: self-contained my_tt_rootcause_corner.spice(템플릿)만 수정/생성
+- base+overlay 방식: my_tt_base_corner.spice + rootcause_overlay.spice를 합쳐 출력 코너 생성
 - Streamlit 대신 Tkinter(Tk) UI
 - 출력:
-  - 코너 1개 생성: my_tt_rootcause_corner.spice 덮어쓰기
+  - 코너 1개 생성: base + overlay + UI 값을 합쳐 출력 코너 생성
   - MC 생성: corner_runs/에 run별 코너 파일 저장
 - 옵션:
   - mm 스위치(MC_MM_SWITCH)
@@ -17,7 +17,7 @@ tk_rootcause_ui.py
 
 사용:
   python tk_rootcause_ui.py
-(이 파일과 my_tt_rootcause_corner.spice를 같은 폴더에 두는 게 가장 간단)
+(이 파일과 my_tt_base_corner.spice/rootcause_overlay.spice를 같은 폴더에 두는 게 가장 간단)
 """
 
 import random, re, subprocess
@@ -36,21 +36,23 @@ def replace_param_in_block(block: str, name: str, value: str) -> str:
     pat = re.compile(rf"(^\.param\s+{re.escape(name)}\s*=\s*)(.+)$", re.MULTILINE)
     if not pat.search(block):
         return block + f"\n.param {name} = {value}\n"
-    return pat.sub(rf"\1{value}", block, count=1)
+    return pat.sub(rf"\g<1>{value}", block, count=1)
 
-def load_corner(path: Path) -> tuple[str,str,str]:
-    txt = path.read_text(encoding="utf-8", errors="ignore")
+def split_rootcause_block(txt: str) -> tuple[str,str,str]:
     if BEGIN not in txt or END not in txt:
-        raise ValueError("코너 파일에 ROOTCAUSE_UI_BEGIN/END 마커가 없어. 제공된 템플릿을 사용해줘.")
+        raise ValueError("overlay 파일에 ROOTCAUSE_UI_BEGIN/END 마커가 없어. rootcause_overlay.spice를 확인해줘.")
     pre, rest = txt.split(BEGIN, 1)
     mid, post = rest.split(END, 1)
     return pre, mid, post
 
-def update_corner_tokens(path: Path, values: dict) -> None:
-    pre, inner, post = load_corner(path)
+def render_corner(base_path: Path, overlay_path: Path, out_path: Path, values: dict) -> None:
+    base_txt = base_path.read_text(encoding="utf-8", errors="ignore").rstrip() + "\n\n"
+    overlay_txt = overlay_path.read_text(encoding="utf-8", errors="ignore")
+    pre, inner, post = split_rootcause_block(overlay_txt)
     for k,v in values.items():
         inner = replace_param_in_block(inner, k, v)
-    path.write_text(pre + BEGIN + inner + END + post, encoding="utf-8")
+    out_txt = base_txt + pre + BEGIN + inner + END + post
+    out_path.write_text(out_txt, encoding="utf-8")
 
 def run_ngspice(top: Path, workdir: Path, run_id: int) -> int:
     logdir = workdir/"logs"
@@ -72,7 +74,9 @@ class App(tk.Tk):
         self.title("TT Root-cause Corner Builder (Tk)")
         self.geometry("1120x740")
 
-        self.corner_path = tk.StringVar(value="my_tt_rootcause_corner.spice")
+        self.base_path = tk.StringVar(value="my_tt_base_corner.spice")
+        self.overlay_path = tk.StringVar(value="rootcause_overlay.spice")
+        self.out_path = tk.StringVar(value="my_tt_rootcause_corner.spice")
         self.top_path = tk.StringVar(value="nmos_test.spice")
 
         self.mm_on = tk.BooleanVar(value=True)
@@ -104,13 +108,21 @@ class App(tk.Tk):
         filefrm = ttk.LabelFrame(frm, text="파일", padding=10)
         filefrm.pack(fill="x")
 
-        ttk.Label(filefrm, text="Corner file").grid(row=0, column=0, sticky="w")
-        ttk.Entry(filefrm, textvariable=self.corner_path, width=70).grid(row=0, column=1, sticky="we", padx=6)
-        ttk.Button(filefrm, text="Browse", command=self._browse_corner).grid(row=0, column=2)
+        ttk.Label(filefrm, text="Base corner file").grid(row=0, column=0, sticky="w")
+        ttk.Entry(filefrm, textvariable=self.base_path, width=70).grid(row=0, column=1, sticky="we", padx=6)
+        ttk.Button(filefrm, text="Browse", command=self._browse_base).grid(row=0, column=2)
 
-        ttk.Label(filefrm, text="Top netlist (ngspice 실행 시)").grid(row=1, column=0, sticky="w")
-        ttk.Entry(filefrm, textvariable=self.top_path, width=70).grid(row=1, column=1, sticky="we", padx=6)
-        ttk.Button(filefrm, text="Browse", command=self._browse_top).grid(row=1, column=2)
+        ttk.Label(filefrm, text="Root-cause overlay file").grid(row=1, column=0, sticky="w")
+        ttk.Entry(filefrm, textvariable=self.overlay_path, width=70).grid(row=1, column=1, sticky="we", padx=6)
+        ttk.Button(filefrm, text="Browse", command=self._browse_overlay).grid(row=1, column=2)
+
+        ttk.Label(filefrm, text="Output corner file").grid(row=2, column=0, sticky="w")
+        ttk.Entry(filefrm, textvariable=self.out_path, width=70).grid(row=2, column=1, sticky="we", padx=6)
+        ttk.Button(filefrm, text="Browse", command=self._browse_output).grid(row=2, column=2)
+
+        ttk.Label(filefrm, text="Top netlist (ngspice 실행 시)").grid(row=3, column=0, sticky="w")
+        ttk.Entry(filefrm, textvariable=self.top_path, width=70).grid(row=3, column=1, sticky="we", padx=6)
+        ttk.Button(filefrm, text="Browse", command=self._browse_top).grid(row=3, column=2)
 
         filefrm.columnconfigure(1, weight=1)
 
@@ -184,9 +196,17 @@ class App(tk.Tk):
         self.status = tk.StringVar(value="준비됨")
         ttk.Label(frm, textvariable=self.status).pack(fill="x")
 
-    def _browse_corner(self):
-        p = filedialog.askopenfilename(title="Select corner spice", filetypes=[("SPICE","*.spice"),("All","*.*")])
-        if p: self.corner_path.set(p)
+    def _browse_base(self):
+        p = filedialog.askopenfilename(title="Select base corner spice", filetypes=[("SPICE","*.spice"),("All","*.*")])
+        if p: self.base_path.set(p)
+
+    def _browse_overlay(self):
+        p = filedialog.askopenfilename(title="Select overlay spice", filetypes=[("SPICE","*.spice"),("All","*.*")])
+        if p: self.overlay_path.set(p)
+
+    def _browse_output(self):
+        p = filedialog.asksaveasfilename(title="Select output corner spice", defaultextension=".spice", filetypes=[("SPICE","*.spice"),("All","*.*")])
+        if p: self.out_path.set(p)
 
     def _browse_top(self):
         p = filedialog.askopenfilename(title="Select top netlist", filetypes=[("SPICE","*.spice"),("All","*.*")])
@@ -217,24 +237,34 @@ class App(tk.Tk):
 
     def make_one(self):
         try:
-            corner = Path(self.corner_path.get()).resolve()
-            if not corner.exists():
-                messagebox.showerror("오류", f"corner 파일 없음: {corner}")
+            base = Path(self.base_path.get()).resolve()
+            overlay = Path(self.overlay_path.get()).resolve()
+            out_corner = Path(self.out_path.get()).resolve()
+            if not base.exists():
+                messagebox.showerror("오류", f"base 파일 없음: {base}")
+                return
+            if not overlay.exists():
+                messagebox.showerror("오류", f"overlay 파일 없음: {overlay}")
                 return
             sample = {k: pct_to_frac(self.dist_vars[k][0].get()) for k in self.dist_vars}
-            update_corner_tokens(corner, self._collect_values(sample))
-            self.status.set(f"코너 업데이트 완료: {corner}")
-            messagebox.showinfo("완료", f"코너 업데이트 완료:\n{corner}")
+            render_corner(base, overlay, out_corner, self._collect_values(sample))
+            self.status.set(f"코너 생성 완료: {out_corner}")
+            messagebox.showinfo("완료", f"코너 생성 완료:\n{out_corner}")
         except Exception as e:
             messagebox.showerror("오류", str(e))
 
     def make_mc(self):
         try:
-            corner = Path(self.corner_path.get()).resolve()
-            if not corner.exists():
-                messagebox.showerror("오류", f"corner 파일 없음: {corner}")
+            base = Path(self.base_path.get()).resolve()
+            overlay = Path(self.overlay_path.get()).resolve()
+            out_corner = Path(self.out_path.get()).resolve()
+            if not base.exists():
+                messagebox.showerror("오류", f"base 파일 없음: {base}")
                 return
-            workdir = corner.parent
+            if not overlay.exists():
+                messagebox.showerror("오류", f"overlay 파일 없음: {overlay}")
+                return
+            workdir = out_corner.parent
             runs = int(self.runs.get())
             random.seed(int(self.seed.get()))
 
@@ -253,8 +283,7 @@ class App(tk.Tk):
                 vals = self._collect_values(sample)
 
                 run_corner = outdir/f"my_tt_rootcause_corner_run{r:04d}.spice"
-                run_corner.write_text(corner.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-                update_corner_tokens(run_corner, vals)
+                render_corner(base, overlay, run_corner, vals)
 
                 rc=0
                 if self.run_sim.get():
@@ -279,10 +308,11 @@ class App(tk.Tk):
     def _help(self):
         messagebox.showinfo(
             "도움말",
-            "1) my_tt_rootcause_corner.spice는 self-contained입니다(외부 include 필요 없음).\n"
-            "2) UI는 ROOTCAUSE_UI_BEGIN/END 사이의 .param만 갱신합니다.\n"
-            "3) MC 생성은 corner_runs/에 run별 코너를 따로 저장합니다.\n"
-            "4) ngspice 실행 옵션을 켜면 logs/에 run별 로그를 남깁니다.\n"
+            "1) base(my_tt_base_corner.spice) + overlay(rootcause_overlay.spice)를 합쳐 코너를 만듭니다.\n"
+            "2) UI는 overlay의 ROOTCAUSE_UI_BEGIN/END 사이 .param만 갱신합니다.\n"
+            "3) 코너 1개 생성은 Output corner file 경로에 저장합니다.\n"
+            "4) MC 생성은 corner_runs/에 run별 코너를 따로 저장합니다.\n"
+            "5) ngspice 실행 옵션을 켜면 logs/에 run별 로그를 남깁니다.\n"
         )
 
 if __name__ == "__main__":
