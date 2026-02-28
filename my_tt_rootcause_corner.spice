@@ -83430,11 +83430,6 @@ msky130_fd_pr__pfet_01v8 d g s b sky130_fd_pr__pfet_01v8__model l = {l} w = {w} 
 .param A_VOFF_P = {NP_SPLIT ? a_voff_p : a_voff}
 .param A_RDSW_P = {NP_SPLIT ? a_rdsw_p : a_rdsw}
 
-.param BIN_SCALE_0 = 1.0
-.param BIN_SCALE_1 = 1.0
-.param BIN_SCALE_2 = 1.0
-.param BIN_SCALE_3 = 1.0
-
 * GLOBAL knobs
 .param sky130_fd_pr__nfet_01v8__dlc_diff = {sky130_fd_pr__nfet_01v8__dlc_diff + A_DLC_N*X_cd}
 .param sky130_fd_pr__nfet_01v8__dwc_diff = {sky130_fd_pr__nfet_01v8__dwc_diff + A_DWC_N*X_cd}
@@ -83445,24 +83440,24 @@ msky130_fd_pr__pfet_01v8 d g s b sky130_fd_pr__pfet_01v8__model l = {l} w = {w} 
 .param sky130_fd_pr__pfet_01v8__toxe_mult = {sky130_fd_pr__pfet_01v8__toxe_mult*(1 + A_TOXE_P*X_eot)}
 
 * BIN indexed knobs (0..3 example)
-.param sky130_fd_pr__nfet_01v8__vth0_diff_0 = {sky130_fd_pr__nfet_01v8__vth0_diff_0 + (A_VTH_N*BIN_SCALE_0)*X_act}
-.param sky130_fd_pr__pfet_01v8__vth0_diff_0 = {sky130_fd_pr__pfet_01v8__vth0_diff_0 + (A_VTH_P*BIN_SCALE_0)*X_act}
-.param sky130_fd_pr__nfet_01v8__vth0_diff_1 = {sky130_fd_pr__nfet_01v8__vth0_diff_1 + (A_VTH_N*BIN_SCALE_1)*X_act}
-.param sky130_fd_pr__pfet_01v8__vth0_diff_1 = {sky130_fd_pr__pfet_01v8__vth0_diff_1 + (A_VTH_P*BIN_SCALE_1)*X_act}
-.param sky130_fd_pr__nfet_01v8__vth0_diff_2 = {sky130_fd_pr__nfet_01v8__vth0_diff_2 + (A_VTH_N*BIN_SCALE_2)*X_act}
-.param sky130_fd_pr__pfet_01v8__vth0_diff_2 = {sky130_fd_pr__pfet_01v8__vth0_diff_2 + (A_VTH_P*BIN_SCALE_2)*X_act}
-.param sky130_fd_pr__nfet_01v8__vth0_diff_3 = {sky130_fd_pr__nfet_01v8__vth0_diff_3 + (A_VTH_N*BIN_SCALE_3)*X_act}
-.param sky130_fd_pr__pfet_01v8__vth0_diff_3 = {sky130_fd_pr__pfet_01v8__vth0_diff_3 + (A_VTH_P*BIN_SCALE_3)*X_act}
+.param sky130_fd_pr__nfet_01v8__vth0_diff_0 = {sky130_fd_pr__nfet_01v8__vth0_diff_0 + A_VTH_N*X_act}
+.param sky130_fd_pr__pfet_01v8__vth0_diff_0 = {sky130_fd_pr__pfet_01v8__vth0_diff_0 + A_VTH_P*X_act}
+.param sky130_fd_pr__nfet_01v8__vth0_diff_1 = {sky130_fd_pr__nfet_01v8__vth0_diff_1 + A_VTH_N*X_act}
+.param sky130_fd_pr__pfet_01v8__vth0_diff_1 = {sky130_fd_pr__pfet_01v8__vth0_diff_1 + A_VTH_P*X_act}
+.param sky130_fd_pr__nfet_01v8__vth0_diff_2 = {sky130_fd_pr__nfet_01v8__vth0_diff_2 + A_VTH_N*X_act}
+.param sky130_fd_pr__pfet_01v8__vth0_diff_2 = {sky130_fd_pr__pfet_01v8__vth0_diff_2 + A_VTH_P*X_act}
+.param sky130_fd_pr__nfet_01v8__vth0_diff_3 = {sky130_fd_pr__nfet_01v8__vth0_diff_3 + A_VTH_N*X_act}
+.param sky130_fd_pr__pfet_01v8__vth0_diff_3 = {sky130_fd_pr__pfet_01v8__vth0_diff_3 + A_VTH_P*X_act}
 
-.param sky130_fd_pr__nfet_01v8__u0_diff_0 = {sky130_fd_pr__nfet_01v8__u0_diff_0 - (A_U0_N*BIN_SCALE_0)*X_damage}
-.param sky130_fd_pr__pfet_01v8__u0_diff_0 = {sky130_fd_pr__pfet_01v8__u0_diff_0 - (A_U0_P*BIN_SCALE_0)*X_damage}
-.param sky130_fd_pr__nfet_01v8__nfactor_diff_0 = {sky130_fd_pr__nfet_01v8__nfactor_diff_0 + (A_NF_N*BIN_SCALE_0)*X_damage}
-.param sky130_fd_pr__pfet_01v8__nfactor_diff_0 = {sky130_fd_pr__pfet_01v8__nfactor_diff_0 + (A_NF_P*BIN_SCALE_0)*X_damage}
-.param sky130_fd_pr__nfet_01v8__voff_diff_0 = {sky130_fd_pr__nfet_01v8__voff_diff_0 + (A_VOFF_N*BIN_SCALE_0)*X_damage}
-.param sky130_fd_pr__pfet_01v8__voff_diff_0 = {sky130_fd_pr__pfet_01v8__voff_diff_0 + (A_VOFF_P*BIN_SCALE_0)*X_damage}
+.param sky130_fd_pr__nfet_01v8__u0_diff_0 = {sky130_fd_pr__nfet_01v8__u0_diff_0 - A_U0_N*X_damage}
+.param sky130_fd_pr__pfet_01v8__u0_diff_0 = {sky130_fd_pr__pfet_01v8__u0_diff_0 - A_U0_P*X_damage}
+.param sky130_fd_pr__nfet_01v8__nfactor_diff_0 = {sky130_fd_pr__nfet_01v8__nfactor_diff_0 + A_NF_N*X_damage}
+.param sky130_fd_pr__pfet_01v8__nfactor_diff_0 = {sky130_fd_pr__pfet_01v8__nfactor_diff_0 + A_NF_P*X_damage}
+.param sky130_fd_pr__nfet_01v8__voff_diff_0 = {sky130_fd_pr__nfet_01v8__voff_diff_0 + A_VOFF_N*X_damage}
+.param sky130_fd_pr__pfet_01v8__voff_diff_0 = {sky130_fd_pr__pfet_01v8__voff_diff_0 + A_VOFF_P*X_damage}
 
-.param sky130_fd_pr__nfet_01v8__rdsw_diff_0 = {sky130_fd_pr__nfet_01v8__rdsw_diff_0 + (A_RDSW_N*BIN_SCALE_0)*X_rc}
-.param sky130_fd_pr__pfet_01v8__rdsw_diff_0 = {sky130_fd_pr__pfet_01v8__rdsw_diff_0 + (A_RDSW_P*BIN_SCALE_0)*X_rc}
+.param sky130_fd_pr__nfet_01v8__rdsw_diff_0 = {sky130_fd_pr__nfet_01v8__rdsw_diff_0 + A_RDSW_N*X_rc}
+.param sky130_fd_pr__pfet_01v8__rdsw_diff_0 = {sky130_fd_pr__pfet_01v8__rdsw_diff_0 + A_RDSW_P*X_rc}
 
 * ============================================================
 * END ROOT-CAUSE OVERRIDES
