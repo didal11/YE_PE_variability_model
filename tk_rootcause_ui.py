@@ -12,7 +12,6 @@ tk_rootcause_ui.py
 - 옵션:
   - mm 스위치(MC_MM_SWITCH)
   - n/p 계수 분리(NP_SPLIT, a_*_n, a_*_p)
-  - bin 스케일(BIN_SCALE_0..3)
   - Root-cause 분포(mean%, sigma%) + MC 샘플링
   - (선택) ngspice 배치 실행 및 logs/ 저장
 
@@ -150,15 +149,6 @@ class App(tk.Tk):
             ttk.Entry(distfrm, textvariable=sg, width=10).grid(row=r, column=4, padx=4)
             r += 1
 
-        binfrm = ttk.LabelFrame(left, text="bin 스케일 (BIN_SCALE_0..3)", padding=10)
-        binfrm.pack(fill="x", pady=10)
-        self.bin_vars={}
-        for i,k in enumerate(["BIN_SCALE_0","BIN_SCALE_1","BIN_SCALE_2","BIN_SCALE_3"]):
-            v = tk.DoubleVar(value=1.0)
-            self.bin_vars[k]=v
-            ttk.Label(binfrm, text=k).grid(row=0, column=i*2, sticky="e")
-            ttk.Entry(binfrm, textvariable=v, width=8).grid(row=0, column=i*2+1, padx=6)
-
         sensfrm = ttk.LabelFrame(right, text="민감도 a_* (파인튜닝)", padding=10)
         sensfrm.pack(fill="both", expand=True)
 
@@ -211,10 +201,6 @@ class App(tk.Tk):
             "X_eot": f"{sample['X_eot']:.12g}",
             "X_act": f"{sample['X_act']:.12g}",
             "X_rc": f"{sample['X_rc']:.12g}",
-            "BIN_SCALE_0": f"{self.bin_vars['BIN_SCALE_0'].get():.12g}",
-            "BIN_SCALE_1": f"{self.bin_vars['BIN_SCALE_1'].get():.12g}",
-            "BIN_SCALE_2": f"{self.bin_vars['BIN_SCALE_2'].get():.12g}",
-            "BIN_SCALE_3": f"{self.bin_vars['BIN_SCALE_3'].get():.12g}",
         }
         for k,v in self.sens_vars.items():
             vals[k]=v.get().strip()
