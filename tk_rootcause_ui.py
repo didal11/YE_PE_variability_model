@@ -30,24 +30,7 @@ BEGIN = "* === ROOTCAUSE_UI_BEGIN ==="
 END   = "* === ROOTCAUSE_UI_END ==="
 
 X_NAMES = ("cd", "damage", "eot", "act", "rc")
-COMPARE_PARAM_SPECS = [
-    ("NFET dlc_diff", "sky130_fd_pr__nfet_01v8__dlc_diff", "diff", "k_nfet_dlc_diff"),
-    ("NFET dwc_diff", "sky130_fd_pr__nfet_01v8__dwc_diff", "diff", "k_nfet_dwc_diff"),
-    ("NFET lint_diff", "sky130_fd_pr__nfet_01v8__lint_diff", "diff", "k_nfet_lint_diff"),
-    ("NFET overlap_mult", "sky130_fd_pr__nfet_01v8__overlap_mult", "mult", "k_nfet_overlap_mult"),
-    ("NFET rshn_mult", "sky130_fd_pr__nfet_01v8__rshn_mult", "mult", "k_nfet_rshn_mult"),
-    ("NFET toxe_mult", "sky130_fd_pr__nfet_01v8__toxe_mult", "mult", "k_nfet_toxe_mult"),
-    ("NFET wint_diff", "sky130_fd_pr__nfet_01v8__wint_diff", "diff", "k_nfet_wint_diff"),
-    ("PFET ajunction_mult", "sky130_fd_pr__pfet_01v8__ajunction_mult", "mult", "k_pfet_ajunction_mult"),
-    ("PFET dlc_diff", "sky130_fd_pr__pfet_01v8__dlc_diff", "diff", "k_pfet_dlc_diff"),
-    ("PFET dwc_diff", "sky130_fd_pr__pfet_01v8__dwc_diff", "diff", "k_pfet_dwc_diff"),
-    ("PFET lint_diff", "sky130_fd_pr__pfet_01v8__lint_diff", "diff", "k_pfet_lint_diff"),
-    ("PFET overlap_mult", "sky130_fd_pr__pfet_01v8__overlap_mult", "mult", "k_pfet_overlap_mult"),
-    ("PFET pjunction_mult", "sky130_fd_pr__pfet_01v8__pjunction_mult", "mult", "k_pfet_pjunction_mult"),
-    ("PFET rshp_mult", "sky130_fd_pr__pfet_01v8__rshp_mult", "mult", "k_pfet_rshp_mult"),
-    ("PFET toxe_mult", "sky130_fd_pr__pfet_01v8__toxe_mult", "mult", "k_pfet_toxe_mult"),
-    ("PFET wint_diff", "sky130_fd_pr__pfet_01v8__wint_diff", "diff", "k_pfet_wint_diff"),
-]
+
 
 def pct_to_frac(x_pct: float) -> float:
     return x_pct/100.0
@@ -91,6 +74,35 @@ def parse_numeric_params(spice_txt: str) -> dict[str, float]:
         in_param_block = False
 
     return params
+
+def build_compare_specs(base_params: dict[str, float], k_params: dict[str, float]) -> list[tuple[str, str, str, str]]:
+    specs: list[tuple[str, str, str, str]] = []
+    k_prefixes = sorted(
+        {
+            m.group(1)
+            for name in k_params
+            for m in [re.match(r"^(k_(?:nfet|pfet)_.+?)_(cd|damage|eot|act|rc)$", name)]
+            if m
+        }
+    )
+
+    for k_prefix in k_prefixes:
+        _, dev, family = k_prefix.split("_", 2)
+        mode = "mult" if family.endswith("_mult") else "diff"
+        base_stem = f"sky130_fd_pr__{dev}_01v8__{family}"
+
+        if base_stem in base_params:
+            p_name = base_stem
+        elif f"{base_stem}_0" in base_params:
+            # bin 파라미터는 대표값으로 _0만 표시
+            p_name = f"{base_stem}_0"
+        else:
+            continue
+
+        label = p_name.replace("sky130_fd_pr__", "")
+        specs.append((label, p_name, mode, k_prefix))
+
+    return specs
 
 def render_corner(base_path: Path, overlay_path: Path, out_path: Path, values: dict) -> None:
     base_txt = base_path.read_text(encoding="utf-8", errors="ignore").rstrip() + "\n\n"
@@ -277,13 +289,12 @@ class App(tk.Tk):
             _, inner, _ = split_rootcause_block(overlay_txt)
             k_params = parse_numeric_params(inner)
             sample = self._current_mean_sample()
+            compare_specs = build_compare_specs(base_params, k_params)
 
             for iid in self.compare_tree.get_children():
                 self.compare_tree.delete(iid)
 
-            for label, p_name, mode, k_prefix in COMPARE_PARAM_SPECS:
-                if p_name not in base_params:
-                    continue
+            for label, p_name, mode, k_prefix in compare_specs:
                 base_v = base_params[p_name]
                 shift = 0.0
                 for xn in X_NAMES:
