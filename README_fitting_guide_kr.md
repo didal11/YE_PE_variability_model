@@ -35,6 +35,9 @@ python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20
 
 # Tk UI로 파라미터 체크박스 선택 후 피팅
 python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --ui
+
+# CLI로 로우데이터 2개 선택 + 데이터당 2회 반복
+python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --raw-select "w0p36u_l0p15u_m1(8701_9_10),w0p39u_l0p15u_m1(8701_11_12)" --runs-per-dataset 2
 ```
 
 ## 피팅 파라미터(5개)
@@ -49,6 +52,14 @@ python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --ui
 
 
 ## UI 기능
+- 파라미터를 1개만 선택해도 동작하도록 처리되어 있습니다(1D는 CMA-ES 대신 단일 변수 스캔으로 최적화).
 - `--ui` 옵션 사용 시 `tt.pm3.spice`의 파라미터를 중요도 순으로 나열한 Tk 체크박스 창이 열립니다.
 - 체크된 파라미터만 피팅 대상으로 사용됩니다.
 - 현재 `ss_ff_param_bounds.csv`에 있는 파라미터만 선택 가능합니다.
+
+
+## 로우데이터 선택
+- `--raw-zip skywater-pdk-sky130-raw-data-main.zip`에서 `nfet_01v8`의 MDM(IDVG 중심) 목록을 자동 탐색합니다.
+- `--ui`에서 파라미터 체크박스 + 로우데이터 체크박스를 같이 선택할 수 있습니다.
+- 각 로우데이터마다 반복 횟수(`Runs per dataset`)를 지정해 개별 피팅 결과를 생성합니다.
+- CLI에서는 `--raw-select "<dataset_key1>,<dataset_key2>" --runs-per-dataset N`으로 지정할 수 있습니다.
