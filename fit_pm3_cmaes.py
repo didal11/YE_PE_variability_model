@@ -264,6 +264,10 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     l = fmt(m.group(2))
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
+def parse_device_geom(dataset_key: str) -> DeviceGeom:
+    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
+    if not m:
+        raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
 
 def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     sweep_start, sweep_stop = float(curve.sweep.min()), float(curve.sweep.max())
