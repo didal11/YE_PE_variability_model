@@ -33,6 +33,7 @@ class MdmCurve:
     sweep: np.ndarray
     current: np.ndarray
     vd: float
+    vg: float
     vb: float
     vs: float
 
@@ -200,12 +201,13 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
     curves = []
     for b in blocks[1:]:
         section = b.split("END_DB")[0]
-        vd = vb = vs = 0.0
+        vd = vg = vb = vs = 0.0
         for line in section.splitlines():
             m = re.match(r"\s*ICCAP_VAR\s+(\w+)\s+([-+0-9.eE]+)", line)
             if m:
                 name, val = m.group(1), float(m.group(2))
                 if name == "VD": vd = val
+                elif name == "VG": vg = val
                 elif name == "VB": vb = val
                 elif name == "VS": vs = val
         header_tokens = None
@@ -236,7 +238,7 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
                     pass
         if data:
             arr = np.array(data)
-            curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vb, vs))
+            curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vg, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
     curves.sort(key=lambda c: c.vd)
@@ -263,24 +265,38 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
 
-def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
-    vg_start, vg_stop = float(curve.sweep.min()), float(curve.sweep.max())
+def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
+    sweep_start, sweep_stop = float(curve.sweep.min()), float(curve.sweep.max())
     step = float(np.median(np.diff(np.unique(curve.sweep)))) if len(np.unique(curve.sweep)) > 1 else 0.05
     if step <= 0:
         step = 0.05
+
+    if curve.sweep_name == "VG":
+        v_d = curve.vd
+        v_g = sweep_start
+        dc_line = f"dc Vg {sweep_start} {sweep_stop} {step}"
+        wr_line = f"wrdata {out_csv.as_posix()} V(g) -I(Vd)"
+    elif curve.sweep_name == "VD":
+        v_d = sweep_start
+        v_g = curve.vg
+        dc_line = f"dc Vd {sweep_start} {sweep_stop} {step}"
+        wr_line = f"wrdata {out_csv.as_posix()} V(d) -I(Vd)"
+    else:
+        raise ValueError(f"Unsupported sweep type: {curve.sweep_name}")
+
     return f"""
 .param MC_MM_SWITCH=0
 .include '{model_file.as_posix()}'
-Vd d 0 {curve.vd}
-Vg g 0 {vg_start}
+Vd d 0 {v_d}
+Vg g 0 {v_g}
 Vs s 0 {curve.vs}
 Vb b 0 {curve.vb}
 X1 d g s b {DEVICE} l={geom.l} w={geom.w} m={geom.m}
 .control
 set wr_vecnames
 set wr_singlescale
-dc Vg {vg_start} {vg_stop} {step}
-wrdata {out_csv.as_posix()} V(g) -I(Vd)
+{dc_line}
+{wr_line}
 quit
 .endc
 .end
@@ -317,7 +333,7 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
     for cidx, curve in enumerate(curves):
         out_csv = run_dir / f"cand_{idx}_curve_{cidx}.csv"
         netlist = run_dir / f"cand_{idx}_curve_{cidx}.sp"
-        netlist.write_text(write_idvg_netlist(model, out_csv, curve, geom))
+        netlist.write_text(write_curve_netlist(model, out_csv, curve, geom))
         run_ngspice(netlist)
         sim_x, sim_i = load_wrdata(out_csv)
         sim_pairs.append((sim_x, sim_i))
