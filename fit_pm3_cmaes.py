@@ -190,7 +190,7 @@ def read_bounds_csv(path: Path) -> Dict[str, Dict[str, float]]:
     return data
 
 
-def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> MdmCurve:
+def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> List[MdmCurve]:
     with zipfile.ZipFile(raw_zip, "r") as zf:
         txt = zf.read(mdm_path).decode(errors="ignore")
     blocks = txt.split("BEGIN_DB")
@@ -220,9 +220,8 @@ def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> MdmCurve:
             curves.append(MdmCurve("VG", arr[:, 0], arr[:, 1], vd, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
-    # representative: highest VD block
     curves.sort(key=lambda c: c.vd)
-    return curves[-1]
+    return curves
 
 
 def parse_device_geom(dataset_key: str) -> DeviceGeom:
@@ -278,7 +277,7 @@ def curve_error(meas_x: np.ndarray, meas_i: np.ndarray, sim_x: np.ndarray, sim_i
     return float(np.sqrt(np.mean((np.log10(np.abs(si_interp) + 1e-15) - np.log10(np.abs(meas_i) + 1e-15)) ** 2)))
 
 
-def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curve: MdmCurve, geom: DeviceGeom, fixed_params: Dict[str, float]) -> float:
+def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curves: List[MdmCurve], geom: DeviceGeom, fixed_params: Dict[str, float]) -> float:
     clipped = np.array([np.clip(v, lo, hi) for v, (lo, hi) in zip(x, bounds)])
     text = tt_text
     for n, v in fixed_params.items():
@@ -287,16 +286,19 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
         text = replace_param(text, n, float(v))
     model = run_dir / f"cand_{idx}.pm3.spice"
     model.write_text(text)
-    out_csv = run_dir / f"cand_{idx}.csv"
-    netlist = run_dir / f"cand_{idx}.sp"
-    netlist.write_text(write_idvg_netlist(model, out_csv, curve, geom))
-    run_ngspice(netlist)
-    sim_x, sim_i = load_wrdata(out_csv)
-    return curve_error(curve.sweep, curve.current, sim_x, sim_i)
+    errs = []
+    for cidx, curve in enumerate(curves):
+        out_csv = run_dir / f"cand_{idx}_curve_{cidx}.csv"
+        netlist = run_dir / f"cand_{idx}_curve_{cidx}.sp"
+        netlist.write_text(write_idvg_netlist(model, out_csv, curve, geom))
+        run_ngspice(netlist)
+        sim_x, sim_i = load_wrdata(out_csv)
+        errs.append(curve_error(curve.sweep, curve.current, sim_x, sim_i))
+    return float(np.mean(errs))
 
 
-def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curve: MdmCurve, geom: DeviceGeom) -> Tuple[np.ndarray, float, str]:
-    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}")
+def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curves: List[MdmCurve], geom: DeviceGeom) -> Tuple[np.ndarray, float, str]:
+    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}, biases={len(curves)}")
     bounds, x0, free_params = [], [], []
     fixed_params: Dict[str, float] = {}
     for p in fit_params:
@@ -312,7 +314,7 @@ def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dic
     print(f"[{run_dir.name}] free params: {free_params}, fixed params: {sorted(fixed_params.keys())}")
 
     if not free_params:
-        f = objective(np.array([]), tt_text, [], [], run_dir, 0, curve, geom, fixed_params)
+        f = objective(np.array([]), tt_text, [], [], run_dir, 0, curves, geom, fixed_params)
         return np.array([fixed_params[p] for p in fit_params], dtype=float), f, "fixed-params"
 
     if len(free_params) == 1:
@@ -320,7 +322,7 @@ def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dic
         xs = np.linspace(lo, hi, max(7, iters * 4))
         bf, bx = float("inf"), xs[0]
         for i, x in enumerate(xs):
-            f = objective(np.array([x]), tt_text, free_params, bounds, run_dir, i, curve, geom, fixed_params)
+            f = objective(np.array([x]), tt_text, free_params, bounds, run_dir, i, curves, geom, fixed_params)
             if f < bf:
                 bf, bx = f, x
         best_map = {**fixed_params, free_params[0]: float(bx)}
@@ -334,7 +336,7 @@ def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dic
         xs = es.ask()
         fs = []
         for x in xs:
-            fs.append(objective(np.array(x), tt_text, free_params, bounds, run_dir, idx, curve, geom, fixed_params))
+            fs.append(objective(np.array(x), tt_text, free_params, bounds, run_dir, idx, curves, geom, fixed_params))
             idx += 1
         es.tell(xs, fs)
         es.disp()
@@ -396,12 +398,12 @@ def main() -> None:
         if ds_key not in raw_lookup:
             raise ValueError(f"Unknown raw dataset key: {ds_key}")
         geom = parse_device_geom(ds_key)
-        curve = parse_mdm_idvg_from_zip(Path(args.raw_zip), raw_lookup[ds_key].idvg_path)
+        curves = parse_mdm_idvg_from_zip(Path(args.raw_zip), raw_lookup[ds_key].idvg_path)
         for rep in range(1, runs_per_ds + 1):
             tag = re.sub(r"[^a-zA-Z0-9_.-]+", "_", f"{ds_key}_run{rep}")
             run_dir = workdir / f"work_{DEVICE}" / tag
             run_dir.mkdir(parents=True, exist_ok=True)
-            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curve, geom)
+            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curves, geom)
             best_text = tt_text
             for n, v in zip(fit_params, best):
                 best_text = replace_param(best_text, n, float(v))
