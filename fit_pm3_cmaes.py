@@ -322,6 +322,10 @@ def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dic
     return np.array([best_map[p] for p in fit_params], dtype=float), float(es.result.fbest), "cma-es"
 
 
+def format_param_values(names: List[str], values: np.ndarray) -> str:
+    return ", ".join(f"{n}={float(v):.8e}" for n, v in zip(names, values))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="PM3 fitter with real raw-data error")
     ap.add_argument("--workdir", default=".")
@@ -378,12 +382,13 @@ def main() -> None:
                 best_text = replace_param(best_text, n, float(v))
             out_model = run_dir / "tt_fitted.pm3.spice"
             out_model.write_text(best_text)
-            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix()))
-            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} saved={out_model}")
+            fit_values = format_param_values(fit_params, best)
+            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix(), fit_values))
+            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} params: {fit_values} saved={out_model}")
 
     print("\n=== Fit summary ===")
-    for ds_key, rep, method, obj, path in summary_rows:
-        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, model={path}")
+    for ds_key, rep, method, obj, path, fit_values in summary_rows:
+        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, params: {fit_values}, model={path}")
 
 
 if __name__ == "__main__":
