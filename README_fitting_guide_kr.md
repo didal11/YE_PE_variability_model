@@ -17,6 +17,8 @@
 
 CSV 컬럼: `param, tt, ss, ff, lower, upper`
 
+현재 CSV는 5개가 아니라 **tt.pm3에 있는 파라미터 전체(추출 가능한 항목 전부)**를 담도록 갱신했습니다.
+
 ## 설치
 
 - ngspice: https://ngspice.sourceforge.io/download.html
