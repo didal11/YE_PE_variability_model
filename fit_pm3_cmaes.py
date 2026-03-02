@@ -209,12 +209,16 @@ def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> MdmCurve:
 
 
 def parse_device_geom(dataset_key: str) -> DeviceGeom:
-    m = re.search(r"w([0-9]+)p([0-9]+)u_l([0-9]+)p([0-9]+)u_m([0-9]+)", dataset_key)
+    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
     if not m:
         raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
-    w = f"{m.group(1)}.{m.group(2)}u"
-    l = f"{m.group(3)}.{m.group(4)}u"
-    return DeviceGeom(w=w, l=l, m=int(m.group(5)))
+
+    def fmt(tok: str) -> str:
+        return f"{tok.replace('p', '.')}u"
+
+    w = fmt(m.group(1))
+    l = fmt(m.group(2))
+    return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
 
 def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
