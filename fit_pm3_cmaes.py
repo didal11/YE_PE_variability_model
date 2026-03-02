@@ -277,12 +277,12 @@ def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: 
         v_d = curve.vd
         v_g = sweep_start
         dc_line = f"dc Vg {sweep_start} {sweep_stop} {step}"
-        wr_line = f"wrdata {out_csv.as_posix()} V(g) -I(Vd)"
+        wr_line = f"wrdata {out_csv.as_posix()} V(g) I(Vd)"
     elif curve.sweep_name == "VD":
         v_d = sweep_start
         v_g = curve.vg
         dc_line = f"dc Vd {sweep_start} {sweep_stop} {step}"
-        wr_line = f"wrdata {out_csv.as_posix()} V(d) -I(Vd)"
+        wr_line = f"wrdata {out_csv.as_posix()} V(d) I(Vd)"
     else:
         raise ValueError(f"Unsupported sweep type: {curve.sweep_name}")
 
@@ -381,7 +381,8 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
         netlist.write_text(write_curve_netlist(model, out_csv, curve, geom))
         run_ngspice(netlist)
         axis_vec = "V(g)" if curve.sweep_name == "VG" else "V(d)"
-        sim_x, sim_i = load_wrdata(out_csv, axis_vec, "-I(Vd)")
+        sim_x, sim_i_raw = load_wrdata(out_csv, axis_vec, "I(Vd)")
+        sim_i = -sim_i_raw
         sim_pairs.append((sim_x, sim_i))
         errs.append(curve_error(curve.sweep, curve.current, sim_x, sim_i))
     mean_err = float(np.mean(errs))
