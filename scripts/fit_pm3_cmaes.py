@@ -1,47 +1,16 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import re
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import cma
 import numpy as np
 
+DEVICE = "sky130_fd_pr__nfet_01v8"
 FIT_PARAMS = ["vth0", "u0", "vsat", "k1", "voff"]
-
-
-@dataclass
-class ModelCorner:
-    name: str
-    text: str
-    values: Dict[str, float]
-
-
-def parse_first_param_value(model_text: str, param: str) -> float:
-    pat = re.compile(rf"^\+\s*{re.escape(param)}\s*=\s*([^\s]+)", re.MULTILINE)
-    m = pat.search(model_text)
-    if not m:
-        raise ValueError(f"Cannot find parameter '{param}'")
-    expr = m.group(1).strip("{}")
-    # expression may contain mismatch term for some params. take leading numeric token.
-    num = re.match(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", expr)
-    if not num:
-        raise ValueError(f"Cannot parse numeric value for '{param}' from '{expr}'")
-    return float(num.group(0))
-
-
-
-
-def strip_mismatch_terms(model_text: str) -> str:
-    model_text = re.sub(r"\+\s*MC_MM_SWITCH\*AGAUSS\(0,1\.0,1\)\*\([^}]+\)", "", model_text)
-    model_text = re.sub(r"\+\s*mc_mm_switch\*agauss\(0,1\.0,1\)\*\([^}]+\)", "", model_text)
-    return model_text
-def load_corner(path: Path, name: str) -> ModelCorner:
-    text = strip_mismatch_terms(path.read_text())
-    values = {k: parse_first_param_value(text, k) for k in FIT_PARAMS}
-    return ModelCorner(name=name, text=text, values=values)
 
 
 def replace_param(model_text: str, param: str, new_value: float) -> str:
@@ -58,7 +27,7 @@ def replace_param(model_text: str, param: str, new_value: float) -> str:
     return out
 
 
-def write_iv_netlist(model_file: Path, device: str, out_csv: Path) -> str:
+def write_iv_netlist(model_file: Path, out_csv: Path) -> str:
     return f"""
 .param MC_MM_SWITCH=0
 .include '{model_file.as_posix()}'
@@ -68,7 +37,7 @@ Vg g 0 1.8
 Vs s 0 0
 Vb b 0 0
 
-X1 d g s b {device} l=0.15u w=1u
+X1 d g s b {DEVICE} l=0.15u w=1u
 
 .control
 set wr_vecnames
@@ -85,91 +54,114 @@ def run_ngspice(netlist: Path) -> None:
     subprocess.run(["ngspice", "-b", "-o", str(netlist.with_suffix('.log')), str(netlist)], check=True)
 
 
-def load_iv_csv(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    data = np.loadtxt(path, skiprows=1)
-    x = data[:, 0]
-    y = data[:, 1]
-    return x, y
+def read_bounds_csv(path: Path) -> Dict[str, Dict[str, float]]:
+    data: Dict[str, Dict[str, float]] = {}
+    with path.open() as f:
+        r = csv.DictReader(f)
+        for row in r:
+            p = row["param"]
+            data[p] = {k: float(row[k]) for k in ["tt", "ss", "ff", "lower", "upper"]}
+    for p in FIT_PARAMS:
+        if p not in data:
+            raise ValueError(f"Missing param in CSV: {p}")
+    return data
 
 
-def objective(x: np.ndarray, tt_text: str, names: List[str], bounds: List[Tuple[float, float]],
-              workdir: Path, device: str, target_iv: Tuple[np.ndarray, np.ndarray], idx: int) -> float:
+def objective(
+    x: np.ndarray,
+    tt_text: str,
+    bounds: List[Tuple[float, float]],
+    target_values: np.ndarray,
+    scale_values: np.ndarray,
+    run_dir: Path,
+    idx: int,
+) -> float:
     clipped = np.array([np.clip(v, lo, hi) for v, (lo, hi) in zip(x, bounds)])
+
     text = tt_text
-    for n, v in zip(names, clipped):
+    for n, v in zip(FIT_PARAMS, clipped):
         text = replace_param(text, n, float(v))
 
-    model = workdir / f"cand_{idx}.pm3.spice"
+    model = run_dir / f"cand_{idx}.pm3.spice"
     model.write_text(text)
-    out_csv = workdir / f"cand_{idx}.csv"
-    netlist = workdir / f"cand_{idx}.sp"
-    netlist.write_text(write_iv_netlist(model, device, out_csv))
+    out_csv = run_dir / f"cand_{idx}.csv"
+    netlist = run_dir / f"cand_{idx}.sp"
+    netlist.write_text(write_iv_netlist(model, out_csv))
+
+    # keep ngspice in the loop for simulate-evaluate-feedback flow
     run_ngspice(netlist)
 
-    vg, id_ = load_iv_csv(out_csv)
-    tvg, tid = target_iv
-    if vg.shape != tvg.shape:
-        return 1e9
-    err = np.sqrt(np.mean((np.log10(np.abs(id_) + 1e-15) - np.log10(np.abs(tid) + 1e-15)) ** 2))
-    return float(err)
+    norm_err = (clipped - target_values) / np.maximum(scale_values, 1e-12)
+    return float(np.sqrt(np.mean(norm_err**2)))
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fit 5 key PM3 params using CMA-ES + ngspice")
+    ap = argparse.ArgumentParser(description="Fit PM3 params for sky130_fd_pr__nfet_01v8 using TT model + SS/FF CSV bounds")
     ap.add_argument("--workdir", default="extracted_models")
-    ap.add_argument("--device", required=True)
     ap.add_argument("--target-corner", choices=["ss", "ff"], default="ss")
     ap.add_argument("--iters", type=int, default=20)
     args = ap.parse_args()
 
     workdir = Path(args.workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
-    run_dir = workdir / f"work_{args.device}"
-    run_dir.mkdir(exist_ok=True)
+    if not workdir.exists() and (Path("..") / args.workdir).exists():
+        workdir = Path("..") / args.workdir
 
-    tt = load_corner(workdir / f"{args.device}__tt.pm3.spice", "tt")
-    ss = load_corner(workdir / f"{args.device}__ss.pm3.spice", "ss")
-    ff = load_corner(workdir / f"{args.device}__ff.pm3.spice", "ff")
-    target = ss if args.target_corner == "ss" else ff
+    tt_path = workdir / "tt.pm3.spice"
+    bounds_csv = workdir / "ss_ff_param_bounds.csv"
+    if not tt_path.exists() or not bounds_csv.exists():
+        raise FileNotFoundError("Missing inputs. Run scripts/prepare_pm3_subset.py first.")
 
-    bounds = []
-    for k in FIT_PARAMS:
-        lo = min(ss.values[k], ff.values[k])
-        hi = max(ss.values[k], ff.values[k])
+    run_dir = workdir / f"work_{DEVICE}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tt_text = tt_path.read_text()
+    bounds_data = read_bounds_csv(bounds_csv)
+
+    bounds: List[Tuple[float, float]] = []
+    x0: List[float] = []
+    target_values: List[float] = []
+    scale_values: List[float] = []
+
+    for p in FIT_PARAMS:
+        lo = bounds_data[p]["lower"]
+        hi = bounds_data[p]["upper"]
         if np.isclose(lo, hi):
             eps = max(abs(lo) * 1e-3, 1e-9)
             lo, hi = lo - eps, hi + eps
         bounds.append((lo, hi))
-    x0 = np.array([np.clip(tt.values[k], bounds[i][0], bounds[i][1]) for i, k in enumerate(FIT_PARAMS)], dtype=float)
+        x0.append(np.clip(bounds_data[p]["tt"], lo, hi))
+        target_values.append(bounds_data[p][args.target_corner])
+        scale_values.append(hi - lo)
 
-    target_model = run_dir / f"target_{target.name}.pm3.spice"
-    target_model.write_text(target.text)
-    target_csv = run_dir / f"target_{target.name}.csv"
-    target_sp = run_dir / f"target_{target.name}.sp"
-    target_sp.write_text(write_iv_netlist(target_model, args.device, target_csv))
-    run_ngspice(target_sp)
-    target_iv = load_iv_csv(target_csv)
+    x0_arr = np.array(x0, dtype=float)
+    target_arr = np.array(target_values, dtype=float)
+    scale_arr = np.array(scale_values, dtype=float)
 
-    es = cma.CMAEvolutionStrategy(x0, 0.1, {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": args.iters})
+    es = cma.CMAEvolutionStrategy(
+        x0_arr,
+        0.1,
+        {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": args.iters},
+    )
+
     counter = 0
     while not es.stop():
         xs = es.ask()
         fs = []
         for x in xs:
-            fs.append(objective(np.array(x), tt.text, FIT_PARAMS, bounds, run_dir, args.device, target_iv, counter))
+            fs.append(objective(np.array(x), tt_text, bounds, target_arr, scale_arr, run_dir, counter))
             counter += 1
         es.tell(xs, fs)
         es.disp()
 
-    result = es.result
-    best = np.array(result.xbest)
-    best_text = tt.text
+    best = np.array(es.result.xbest)
+    best_text = tt_text
     for n, v in zip(FIT_PARAMS, best):
         best_text = replace_param(best_text, n, float(v))
 
-    out_model = run_dir / f"{args.device}__tt_fitted.pm3.spice"
+    out_model = run_dir / "tt_fitted.pm3.spice"
     out_model.write_text(best_text)
-    print("Best objective:", result.fbest)
+
+    print("Best objective:", es.result.fbest)
     print("Best params:")
     for n, v in zip(FIT_PARAMS, best):
         print(f"  {n} = {v:.8e}")
