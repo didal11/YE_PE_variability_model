@@ -246,8 +246,6 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     l = fmt(m.group(2))
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
-    def fmt(tok: str) -> str:
-        return f"{tok.replace('p', '.')}u"
 
 def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     vg_start, vg_stop = float(curve.sweep.min()), float(curve.sweep.max())
@@ -373,54 +371,75 @@ def create_live_plotter(curves: List[MdmCurve]):
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
 
-    win = tk.Tk()
-    win.title("PM3 Fitting Live Plot")
-    win.geometry("1100x760")
+    groups = {
+        "IDVG": [c for c in curves if c.sweep_name == "VG"],
+        "IDVD": [c for c in curves if c.sweep_name == "VD"],
+    }
 
-    status_var = tk.StringVar(value="waiting for first candidate...")
-    tk.Label(win, textvariable=status_var, anchor="w").pack(fill="x", padx=8, pady=4)
+    windows = []
 
-    fig = Figure(figsize=(10, 6), dpi=100)
-    ax = fig.add_subplot(111)
-    ax.set_yscale("log")
-    ax.set_xlabel("Sweep voltage (V)")
-    ax.set_ylabel("|Id| (A)")
+    def build_window(title: str, grp_curves: List[MdmCurve]):
+        win = tk.Tk()
+        win.title(title)
+        win.geometry("900x620")
 
-    canvas = FigureCanvasTkAgg(fig, master=win)
-    canvas.get_tk_widget().pack(fill="both", expand=True)
+        status_var = tk.StringVar(value="waiting for first candidate...")
+        tk.Label(win, textvariable=status_var, anchor="w").pack(fill="x", padx=8, pady=4)
 
-    meas_lines = []
-    sim_lines = []
-    for i, curve in enumerate(curves):
-        color = f"C{i % 10}"
-        (ml,) = ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=2.0, alpha=0.75,
-                        label=("meas " + curve.sweep_name if i < 8 else None))
-        (sl,) = ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=1.0, linestyle="--", alpha=0.9)
-        meas_lines.append(ml)
-        sim_lines.append(sl)
+        fig = Figure(figsize=(8.5, 5.5), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_yscale("log")
+        ax.set_xlabel("Sweep voltage (V)")
+        ax.set_ylabel("|Id| (A)")
+        ax.grid(True, which="both", alpha=0.2)
 
-    if len(curves) <= 8:
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        sim_lines = []
+        for i, curve in enumerate(grp_curves):
+            color = f"C{i % 10}"
+            ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=2.0, alpha=0.75,
+                    label=("meas" if i == 0 else None))
+            (sl,) = ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=1.0, linestyle="--", alpha=0.9,
+                            label=("sim" if i == 0 else None))
+            sim_lines.append(sl)
         ax.legend(loc="best", fontsize=8)
+        canvas.draw()
 
-    ax.grid(True, which="both", alpha=0.2)
-    canvas.draw()
+        windows.append({"root": win, "status": status_var, "canvas": canvas, "lines": sim_lines, "curves": grp_curves})
+
+    if groups["IDVG"]:
+        build_window("PM3 Fitting Live Plot - IDVG", groups["IDVG"])
+    if groups["IDVD"]:
+        build_window("PM3 Fitting Live Plot - IDVD", groups["IDVD"])
 
     def update(idx: int, cb_curves: List[MdmCurve], sim_pairs: List[Tuple[np.ndarray, np.ndarray]], err: float) -> None:
         if idx % 3 != 0:
             return
-        for line, (sx, si) in zip(sim_lines, sim_pairs):
-            line.set_data(sx, np.abs(si) + 1e-15)
-        ax.relim()
-        ax.autoscale_view()
-        status_var.set(f"candidate={idx}, objective={err:.6e}")
-        canvas.draw_idle()
-        win.update_idletasks()
-        win.update()
+        sim_map = {id(c): pair for c, pair in zip(cb_curves, sim_pairs)}
+        for w in windows:
+            for line, curve in zip(w["lines"], w["curves"]):
+                sx, si = sim_map[id(curve)]
+                line.set_data(sx, np.abs(si) + 1e-15)
+            ax = w["canvas"].figure.axes[0]
+            ax.relim()
+            ax.autoscale_view()
+            w["status"].set(f"candidate={idx}, objective={err:.6e}")
+            w["canvas"].draw_idle()
+            w["root"].update_idletasks()
+            w["root"].update()
 
-    def close() -> None:
-        win.destroy()
+    return update, windows
 
-    return update, close
+
+def wait_for_plot_windows(plot_windows: List[dict]) -> None:
+    alive = [w for w in plot_windows if w["root"].winfo_exists()]
+    while alive:
+        for w in alive:
+            w["root"].update_idletasks()
+            w["root"].update()
+        alive = [w for w in plot_windows if w["root"].winfo_exists()]
 
 
 def main() -> None:
@@ -478,14 +497,13 @@ def main() -> None:
             run_dir = workdir / f"work_{DEVICE}" / tag
             run_dir.mkdir(parents=True, exist_ok=True)
             progress_cb = None
-            close_plotter = None
+            plot_windows: List[dict] = []
             if args.ui:
-                progress_cb, close_plotter = create_live_plotter(curves)
-            try:
-                best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curves, geom, progress_cb)
-            finally:
-                if close_plotter is not None:
-                    close_plotter()
+                progress_cb, plot_windows = create_live_plotter(curves)
+            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curves, geom, progress_cb)
+            if args.ui and plot_windows:
+                print("Fitting finished. Close plot windows to continue.")
+                wait_for_plot_windows(plot_windows)
             best_text = tt_text
             for n, v in zip(fit_params, best):
                 best_text = replace_param(best_text, n, float(v))
