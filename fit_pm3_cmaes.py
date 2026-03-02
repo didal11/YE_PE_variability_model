@@ -79,6 +79,23 @@ def select_with_tk(sorted_params: List[str], default_selected: List[str], availa
     import tkinter as tk
     from tkinter import messagebox
 
+    def build_scrollable_checklist(parent: tk.Widget, title: str) -> tuple[tk.LabelFrame, tk.Frame]:
+        frame = tk.LabelFrame(parent, text=title)
+        frame.pack(side="left", fill="both", expand=True, padx=4)
+
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        scrollbar = tk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        items = tk.Frame(canvas)
+
+        items.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+        window_id = canvas.create_window((0, 0), window=items, anchor="nw")
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        return frame, items
+
     root = tk.Tk()
     root.title("PM3 Fit Selection")
     root.geometry("980x760")
@@ -87,22 +104,20 @@ def select_with_tk(sorted_params: List[str], default_selected: List[str], availa
     cols = tk.Frame(root)
     cols.pack(fill="both", expand=True, padx=8, pady=4)
 
-    p_frame = tk.LabelFrame(cols, text="파라미터")
-    p_frame.pack(side="left", fill="both", expand=True, padx=4)
-    d_frame = tk.LabelFrame(cols, text=f"로우데이터 ({len(raw_datasets)}개)")
-    d_frame.pack(side="left", fill="both", expand=True, padx=4)
+    _, p_items = build_scrollable_checklist(cols, "파라미터")
+    _, d_items = build_scrollable_checklist(cols, f"로우데이터 ({len(raw_datasets)}개)")
 
     p_vars, d_vars = {}, {}
     for i, p in enumerate(sorted_params, 1):
         v = tk.BooleanVar(value=(p in default_selected and p in available_bounds))
-        cb = tk.Checkbutton(p_frame, text=f"{i:03d}. {p}", variable=v, anchor="w")
+        cb = tk.Checkbutton(p_items, text=f"{i:03d}. {p}", variable=v, anchor="w")
         if p not in available_bounds:
             cb.configure(state="disabled", fg="red")
         cb.pack(fill="x")
         p_vars[p] = v
     for i, d in enumerate(raw_datasets, 1):
         v = tk.BooleanVar(value=(i == 1))
-        tk.Checkbutton(d_frame, text=f"{i:03d}. {d.key}", variable=v, anchor="w").pack(fill="x")
+        tk.Checkbutton(d_items, text=f"{i:03d}. {d.key}", variable=v, anchor="w").pack(fill="x")
         d_vars[d.key] = v
 
     btm = tk.Frame(root)
