@@ -12,7 +12,11 @@ import cma
 import numpy as np
 
 DEVICE = "sky130_fd_pr__nfet_01v8"
-DEFAULT_FIT_PARAMS = ["vth0", "u0", "vsat", "k1", "voff"]
+DEFAULT_FIT_PARAMS = [
+    "vth0", "u0", "nfactor", "k2", "toxe",
+    "wint", "lint", "ua", "ub", "a0", "ags",
+    "dlc", "dwc", "cgso", "cgdo", "cjs", "cjsws", "cjswgs",
+]
 DEFAULT_RAW_ZIP = "skywater-pdk-sky130-raw-data-main.zip"
 
 
@@ -81,6 +85,19 @@ def rank_params(params: List[str]) -> List[str]:
 
     return sorted(params, key=score)
 
+
+
+
+def select_fit_candidates(bounds_data: Dict[str, Dict[str, float]]) -> List[str]:
+    candidates = []
+    for p in DEFAULT_FIT_PARAMS:
+        if p not in bounds_data:
+            continue
+        d = bounds_data[p]
+        if d["tt"] == d["ss"] == d["ff"]:
+            continue
+        candidates.append(p)
+    return rank_params(candidates)
 
 def select_with_tk(sorted_params: List[str], default_selected: List[str], available_bounds: set[str], raw_datasets: List[RawDataset]) -> Tuple[List[str], List[str], int]:
     import tkinter as tk
@@ -350,11 +367,11 @@ def main() -> None:
     print(f"Discovered raw datasets: {len(raw_sets)}")
 
     tt_text = tt_path.read_text()
-    all_params = rank_params(parse_all_tt_params(tt_text))
     bounds_data = read_bounds_csv(bounds_csv)
+    fit_candidates = select_fit_candidates(bounds_data)
 
     if args.ui:
-        fit_params, selected_raw, runs_per_ds = select_with_tk(all_params, DEFAULT_FIT_PARAMS, set(bounds_data.keys()), raw_sets)
+        fit_params, selected_raw, runs_per_ds = select_with_tk(fit_candidates, DEFAULT_FIT_PARAMS, set(fit_candidates), raw_sets)
     else:
         fit_params = [p.strip() for p in args.params.split(",") if p.strip()]
         selected_raw = [s.strip() for s in args.raw_select.split(",") if s.strip()] if args.raw_select else ([raw_sets[0].key] if raw_sets else [])
@@ -368,6 +385,10 @@ def main() -> None:
     missing = [p for p in fit_params if p not in bounds_data]
     if missing:
         raise ValueError(f"Selected params not present in ss_ff_param_bounds.csv: {missing}")
+
+    unsupported = [p for p in fit_params if p not in fit_candidates]
+    if unsupported:
+        raise ValueError(f"Only variable params are allowed for fitting: {unsupported}")
 
     raw_lookup = {d.key: d for d in raw_sets}
     summary_rows = []
