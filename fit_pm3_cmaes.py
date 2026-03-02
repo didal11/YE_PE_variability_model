@@ -208,13 +208,29 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
                 if name == "VD": vd = val
                 elif name == "VB": vb = val
                 elif name == "VS": vs = val
+        header_tokens = None
+        for ln in section.splitlines():
+            sl = ln.strip()
+            if sl.startswith("#"):
+                header_tokens = sl.lstrip("#").split()
+                break
+
+        if header_tokens is None:
+            raise ValueError(f"Missing data header in {mdm_path}")
+
+        if sweep_name not in header_tokens or "ID" not in header_tokens:
+            raise ValueError(f"Required columns missing in {mdm_path}: header={header_tokens}")
+
+        x_idx = header_tokens.index(sweep_name)
+        i_idx = header_tokens.index("ID")
+
         lines = [ln.strip() for ln in section.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         data = []
         for ln in lines:
             parts = ln.split()
-            if len(parts) >= 3:
+            if len(parts) > max(x_idx, i_idx):
                 try:
-                    x = float(parts[0]); i = float(parts[2])
+                    x = float(parts[x_idx]); i = float(parts[i_idx])
                     data.append((x, i))
                 except Exception:
                     pass
