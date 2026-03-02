@@ -447,8 +447,6 @@ def create_live_plotter(curves: List[MdmCurve]):
         build_window("PM3 Fitting Live Plot - IDVD", groups["IDVD"])
 
     def update(idx: int, cb_curves: List[MdmCurve], sim_pairs: List[Tuple[np.ndarray, np.ndarray]], err: float) -> None:
-        if idx % 3 != 0:
-            return
         sim_map = {id(c): pair for c, pair in zip(cb_curves, sim_pairs)}
         for w in windows:
             for line, curve in zip(w["lines"], w["curves"]):
