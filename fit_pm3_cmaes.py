@@ -246,6 +246,8 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     l = fmt(m.group(2))
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
+    def fmt(tok: str) -> str:
+        return f"{tok.replace('p', '.')}u"
 
 def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     vg_start, vg_stop = float(curve.sweep.min()), float(curve.sweep.max())
