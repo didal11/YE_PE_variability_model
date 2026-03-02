@@ -341,6 +341,13 @@ def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray
 
     axis_idx = pick_idx([axis_vec])
     current_idx = pick_idx([current_vec])
+
+    # ngspice may emit only `v-sweep` and current (without explicit V(g)/V(d)
+    # column name) when writing sweeps with wr_singlescale.
+    if axis_idx is None and current_idx is not None and len(effective_header) == d.shape[1] == 2:
+        if effective_header[0].lower() == "v-sweep":
+            axis_idx = 0
+
     if axis_idx is None or current_idx is None:
         raise ValueError(
             f"Missing vectors in wrdata header for {path}: header={effective_header}, "
