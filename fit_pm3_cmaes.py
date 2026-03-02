@@ -6,13 +6,17 @@ import subprocess
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cma
 import numpy as np
 
 DEVICE = "sky130_fd_pr__nfet_01v8"
-DEFAULT_FIT_PARAMS = ["vth0", "u0", "vsat", "k1", "voff"]
+DEFAULT_FIT_PARAMS = [
+    "vth0", "u0", "nfactor", "k2", "toxe",
+    "wint", "lint", "ua", "ub", "a0", "ags",
+    "dlc", "dwc", "cgso", "cgdo", "cjs", "cjsws", "cjswgs",
+]
 DEFAULT_RAW_ZIP = "skywater-pdk-sky130-raw-data-main.zip"
 
 
@@ -29,8 +33,19 @@ class MdmCurve:
     sweep: np.ndarray
     current: np.ndarray
     vd: float
+    vg: float
     vb: float
     vs: float
+
+
+@dataclass
+class DeviceGeom:
+    w: str
+    l: str
+    m: int
+
+
+ProgressCallback = Callable[[int, List[MdmCurve], List[Tuple[np.ndarray, np.ndarray]], float], None]
 
 
 def discover_raw_datasets(raw_zip: Path) -> List[RawDataset]:
@@ -74,6 +89,19 @@ def rank_params(params: List[str]) -> List[str]:
 
     return sorted(params, key=score)
 
+
+
+
+def select_fit_candidates(bounds_data: Dict[str, Dict[str, float]]) -> List[str]:
+    candidates = []
+    for p in DEFAULT_FIT_PARAMS:
+        if p not in bounds_data:
+            continue
+        d = bounds_data[p]
+        if d["tt"] == d["ss"] == d["ff"]:
+            continue
+        candidates.append(p)
+    return rank_params(candidates)
 
 def select_with_tk(sorted_params: List[str], default_selected: List[str], available_bounds: set[str], raw_datasets: List[RawDataset]) -> Tuple[List[str], List[str], int]:
     import tkinter as tk
@@ -166,59 +194,109 @@ def read_bounds_csv(path: Path) -> Dict[str, Dict[str, float]]:
     return data
 
 
-def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> MdmCurve:
+def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> List[MdmCurve]:
     with zipfile.ZipFile(raw_zip, "r") as zf:
         txt = zf.read(mdm_path).decode(errors="ignore")
     blocks = txt.split("BEGIN_DB")
     curves = []
     for b in blocks[1:]:
         section = b.split("END_DB")[0]
-        vd = vb = vs = 0.0
+        vd = vg = vb = vs = 0.0
         for line in section.splitlines():
             m = re.match(r"\s*ICCAP_VAR\s+(\w+)\s+([-+0-9.eE]+)", line)
             if m:
                 name, val = m.group(1), float(m.group(2))
                 if name == "VD": vd = val
+                elif name == "VG": vg = val
                 elif name == "VB": vb = val
                 elif name == "VS": vs = val
+        header_tokens = None
+        for ln in section.splitlines():
+            sl = ln.strip()
+            if sl.startswith("#"):
+                header_tokens = sl.lstrip("#").split()
+                break
+
+        if header_tokens is None:
+            raise ValueError(f"Missing data header in {mdm_path}")
+
+        if sweep_name not in header_tokens or "ID" not in header_tokens:
+            raise ValueError(f"Required columns missing in {mdm_path}: header={header_tokens}")
+
+        x_idx = header_tokens.index(sweep_name)
+        i_idx = header_tokens.index("ID")
+
         lines = [ln.strip() for ln in section.splitlines() if ln.strip() and not ln.strip().startswith("#")]
         data = []
         for ln in lines:
             parts = ln.split()
-            if len(parts) >= 3:
+            if len(parts) > max(x_idx, i_idx):
                 try:
-                    x = float(parts[0]); i = float(parts[2])
+                    x = float(parts[x_idx]); i = float(parts[i_idx])
                     data.append((x, i))
                 except Exception:
                     pass
         if data:
             arr = np.array(data)
-            curves.append(MdmCurve("VG", arr[:, 0], arr[:, 1], vd, vb, vs))
+            curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vg, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
-    # representative: highest VD block
     curves.sort(key=lambda c: c.vd)
-    return curves[-1]
+    return curves
 
 
-def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve) -> str:
-    vg_start, vg_stop = float(curve.sweep.min()), float(curve.sweep.max())
+def load_dataset_curves(raw_zip: Path, ds: RawDataset) -> List[MdmCurve]:
+    curves = parse_mdm_curves_from_zip(raw_zip, ds.idvg_path, "VG")
+    if ds.idvd_path:
+        curves.extend(parse_mdm_curves_from_zip(raw_zip, ds.idvd_path, "VD"))
+    return curves
+
+
+def parse_device_geom(dataset_key: str) -> DeviceGeom:
+    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
+    if not m:
+        raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
+
+    def fmt(tok: str) -> str:
+        return f"{tok.replace('p', '.')}u"
+
+    w = fmt(m.group(1))
+    l = fmt(m.group(2))
+    return DeviceGeom(w=w, l=l, m=int(m.group(3)))
+
+
+def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
+    sweep_start, sweep_stop = float(curve.sweep.min()), float(curve.sweep.max())
     step = float(np.median(np.diff(np.unique(curve.sweep)))) if len(np.unique(curve.sweep)) > 1 else 0.05
     if step <= 0:
         step = 0.05
+
+    if curve.sweep_name == "VG":
+        v_d = curve.vd
+        v_g = sweep_start
+        dc_line = f"dc Vg {sweep_start} {sweep_stop} {step}"
+        wr_line = f"wrdata {out_csv.as_posix()} V(g) -I(Vd)"
+    elif curve.sweep_name == "VD":
+        v_d = sweep_start
+        v_g = curve.vg
+        dc_line = f"dc Vd {sweep_start} {sweep_stop} {step}"
+        wr_line = f"wrdata {out_csv.as_posix()} V(d) -I(Vd)"
+    else:
+        raise ValueError(f"Unsupported sweep type: {curve.sweep_name}")
+
     return f"""
 .param MC_MM_SWITCH=0
 .include '{model_file.as_posix()}'
-Vd d 0 {curve.vd}
-Vg g 0 {vg_start}
+Vd d 0 {v_d}
+Vg g 0 {v_g}
 Vs s 0 {curve.vs}
 Vb b 0 {curve.vb}
-X1 d g s b {DEVICE} l=0.15u w=1u
+X1 d g s b {DEVICE} l={geom.l} w={geom.w} m={geom.m}
 .control
 set wr_vecnames
 set wr_singlescale
-dc Vg {vg_start} {vg_stop} {step}
-wrdata {out_csv.as_posix()} V(g) -I(Vd)
+{dc_line}
+{wr_line}
 quit
 .endc
 .end
@@ -241,52 +319,159 @@ def curve_error(meas_x: np.ndarray, meas_i: np.ndarray, sim_x: np.ndarray, sim_i
     return float(np.sqrt(np.mean((np.log10(np.abs(si_interp) + 1e-15) - np.log10(np.abs(meas_i) + 1e-15)) ** 2)))
 
 
-def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curve: MdmCurve) -> float:
+def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curves: List[MdmCurve], geom: DeviceGeom, fixed_params: Dict[str, float], progress_cb: Optional[ProgressCallback] = None) -> float:
     clipped = np.array([np.clip(v, lo, hi) for v, (lo, hi) in zip(x, bounds)])
     text = tt_text
+    for n, v in fixed_params.items():
+        text = replace_param(text, n, float(v))
     for n, v in zip(fit_params, clipped):
         text = replace_param(text, n, float(v))
     model = run_dir / f"cand_{idx}.pm3.spice"
     model.write_text(text)
-    out_csv = run_dir / f"cand_{idx}.csv"
-    netlist = run_dir / f"cand_{idx}.sp"
-    netlist.write_text(write_idvg_netlist(model, out_csv, curve))
-    run_ngspice(netlist)
-    sim_x, sim_i = load_wrdata(out_csv)
-    return curve_error(curve.sweep, curve.current, sim_x, sim_i)
+    errs = []
+    sim_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
+    for cidx, curve in enumerate(curves):
+        out_csv = run_dir / f"cand_{idx}_curve_{cidx}.csv"
+        netlist = run_dir / f"cand_{idx}_curve_{cidx}.sp"
+        netlist.write_text(write_curve_netlist(model, out_csv, curve, geom))
+        run_ngspice(netlist)
+        sim_x, sim_i = load_wrdata(out_csv)
+        sim_pairs.append((sim_x, sim_i))
+        errs.append(curve_error(curve.sweep, curve.current, sim_x, sim_i))
+    mean_err = float(np.mean(errs))
+    if progress_cb is not None:
+        progress_cb(idx, curves, sim_pairs, mean_err)
+    return mean_err
 
 
-def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curve: MdmCurve) -> Tuple[np.ndarray, float, str]:
-    bounds, x0 = [], []
+def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curves: List[MdmCurve], geom: DeviceGeom, progress_cb: Optional[ProgressCallback] = None) -> Tuple[np.ndarray, float, str]:
+    n_idvg = sum(1 for c in curves if c.sweep_name == "VG")
+    n_idvd = sum(1 for c in curves if c.sweep_name == "VD")
+    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}, biases(total={len(curves)}, idvg={n_idvg}, idvd={n_idvd})")
+    bounds, x0, free_params = [], [], []
+    fixed_params: Dict[str, float] = {}
     for p in fit_params:
         lo, hi = bounds_data[p]["lower"], bounds_data[p]["upper"]
+        tt = np.clip(bounds_data[p]["tt"], lo, hi)
         if np.isclose(lo, hi):
-            eps = max(abs(lo) * 1e-3, 1e-9)
-            lo, hi = lo - eps, hi + eps
+            fixed_params[p] = float(tt)
+            continue
+        free_params.append(p)
         bounds.append((lo, hi))
-        x0.append(np.clip(bounds_data[p]["tt"], lo, hi))
+        x0.append(tt)
 
-    if len(fit_params) == 1:
+    print(f"[{run_dir.name}] free params: {free_params}, fixed params: {sorted(fixed_params.keys())}")
+
+    if not free_params:
+        f = objective(np.array([]), tt_text, [], [], run_dir, 0, curves, geom, fixed_params, progress_cb)
+        return np.array([fixed_params[p] for p in fit_params], dtype=float), f, "fixed-params"
+
+    if len(free_params) == 1:
         lo, hi = bounds[0]
         xs = np.linspace(lo, hi, max(7, iters * 4))
         bf, bx = float("inf"), xs[0]
         for i, x in enumerate(xs):
-            f = objective(np.array([x]), tt_text, fit_params, bounds, run_dir, i, curve)
+            f = objective(np.array([x]), tt_text, free_params, bounds, run_dir, i, curves, geom, fixed_params, progress_cb)
             if f < bf:
                 bf, bx = f, x
-        return np.array([bx]), bf, "grid-1d"
+        best_map = {**fixed_params, free_params[0]: float(bx)}
+        return np.array([best_map[p] for p in fit_params], dtype=float), bf, "grid-1d"
 
-    es = cma.CMAEvolutionStrategy(np.array(x0, dtype=float), 0.1, {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": iters})
+    spans = [hi - lo for lo, hi in bounds]
+    sigma0 = max(min(spans) * 0.25, 1e-6)
+    es = cma.CMAEvolutionStrategy(np.array(x0, dtype=float), sigma0, {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": iters})
     idx = 0
     while not es.stop():
         xs = es.ask()
         fs = []
         for x in xs:
-            fs.append(objective(np.array(x), tt_text, fit_params, bounds, run_dir, idx, curve))
+            fs.append(objective(np.array(x), tt_text, free_params, bounds, run_dir, idx, curves, geom, fixed_params, progress_cb))
             idx += 1
         es.tell(xs, fs)
         es.disp()
-    return np.array(es.result.xbest), float(es.result.fbest), "cma-es"
+    best_map = {**fixed_params}
+    best_map.update({n: float(v) for n, v in zip(free_params, es.result.xbest)})
+    return np.array([best_map[p] for p in fit_params], dtype=float), float(es.result.fbest), "cma-es"
+
+
+def format_param_values(names: List[str], values: np.ndarray) -> str:
+    return ", ".join(f"{n}={float(v):.8e}" for n, v in zip(names, values))
+
+
+def create_live_plotter(curves: List[MdmCurve]):
+    import tkinter as tk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+
+    groups = {
+        "IDVG": [c for c in curves if c.sweep_name == "VG"],
+        "IDVD": [c for c in curves if c.sweep_name == "VD"],
+    }
+
+    windows = []
+
+    def build_window(title: str, grp_curves: List[MdmCurve]):
+        win = tk.Tk()
+        win.title(title)
+        win.geometry("900x620")
+
+        status_var = tk.StringVar(value="waiting for first candidate...")
+        tk.Label(win, textvariable=status_var, anchor="w").pack(fill="x", padx=8, pady=4)
+
+        fig = Figure(figsize=(8.5, 5.5), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.set_yscale("log")
+        ax.set_xlabel("Sweep voltage (V)")
+        ax.set_ylabel("|Id| (A)")
+        ax.grid(True, which="both", alpha=0.2)
+
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        sim_lines = []
+        for i, curve in enumerate(grp_curves):
+            color = f"C{i % 10}"
+            ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=2.0, alpha=0.75,
+                    label=("meas" if i == 0 else None))
+            (sl,) = ax.plot(curve.sweep, np.abs(curve.current) + 1e-15, color=color, linewidth=1.0, linestyle="--", alpha=0.9,
+                            label=("sim" if i == 0 else None))
+            sim_lines.append(sl)
+        ax.legend(loc="best", fontsize=8)
+        canvas.draw()
+
+        windows.append({"root": win, "status": status_var, "canvas": canvas, "lines": sim_lines, "curves": grp_curves})
+
+    if groups["IDVG"]:
+        build_window("PM3 Fitting Live Plot - IDVG", groups["IDVG"])
+    if groups["IDVD"]:
+        build_window("PM3 Fitting Live Plot - IDVD", groups["IDVD"])
+
+    def update(idx: int, cb_curves: List[MdmCurve], sim_pairs: List[Tuple[np.ndarray, np.ndarray]], err: float) -> None:
+        if idx % 3 != 0:
+            return
+        sim_map = {id(c): pair for c, pair in zip(cb_curves, sim_pairs)}
+        for w in windows:
+            for line, curve in zip(w["lines"], w["curves"]):
+                sx, si = sim_map[id(curve)]
+                line.set_data(sx, np.abs(si) + 1e-15)
+            ax = w["canvas"].figure.axes[0]
+            ax.relim()
+            ax.autoscale_view()
+            w["status"].set(f"candidate={idx}, objective={err:.6e}")
+            w["canvas"].draw_idle()
+            w["root"].update_idletasks()
+            w["root"].update()
+
+    return update, windows
+
+
+def wait_for_plot_windows(plot_windows: List[dict]) -> None:
+    alive = [w for w in plot_windows if w["root"].winfo_exists()]
+    while alive:
+        for w in alive:
+            w["root"].update_idletasks()
+            w["root"].update()
+        alive = [w for w in plot_windows if w["root"].winfo_exists()]
 
 
 def main() -> None:
@@ -309,11 +494,11 @@ def main() -> None:
     print(f"Discovered raw datasets: {len(raw_sets)}")
 
     tt_text = tt_path.read_text()
-    all_params = rank_params(parse_all_tt_params(tt_text))
     bounds_data = read_bounds_csv(bounds_csv)
+    fit_candidates = select_fit_candidates(bounds_data)
 
     if args.ui:
-        fit_params, selected_raw, runs_per_ds = select_with_tk(all_params, DEFAULT_FIT_PARAMS, set(bounds_data.keys()), raw_sets)
+        fit_params, selected_raw, runs_per_ds = select_with_tk(fit_candidates, DEFAULT_FIT_PARAMS, set(fit_candidates), raw_sets)
     else:
         fit_params = [p.strip() for p in args.params.split(",") if p.strip()]
         selected_raw = [s.strip() for s in args.raw_select.split(",") if s.strip()] if args.raw_select else ([raw_sets[0].key] if raw_sets else [])
@@ -328,28 +513,41 @@ def main() -> None:
     if missing:
         raise ValueError(f"Selected params not present in ss_ff_param_bounds.csv: {missing}")
 
+    unsupported = [p for p in fit_params if p not in fit_candidates]
+    if unsupported:
+        raise ValueError(f"Only variable params are allowed for fitting: {unsupported}")
+
     raw_lookup = {d.key: d for d in raw_sets}
     summary_rows = []
     for ds_key in selected_raw:
         if ds_key not in raw_lookup:
             raise ValueError(f"Unknown raw dataset key: {ds_key}")
-        curve = parse_mdm_idvg_from_zip(Path(args.raw_zip), raw_lookup[ds_key].idvg_path)
+        geom = parse_device_geom(ds_key)
+        curves = load_dataset_curves(Path(args.raw_zip), raw_lookup[ds_key])
         for rep in range(1, runs_per_ds + 1):
             tag = re.sub(r"[^a-zA-Z0-9_.-]+", "_", f"{ds_key}_run{rep}")
             run_dir = workdir / f"work_{DEVICE}" / tag
             run_dir.mkdir(parents=True, exist_ok=True)
-            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curve)
+            progress_cb = None
+            plot_windows: List[dict] = []
+            if args.ui:
+                progress_cb, plot_windows = create_live_plotter(curves)
+            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curves, geom, progress_cb)
+            if args.ui and plot_windows:
+                print("Fitting finished. Close plot windows to continue.")
+                wait_for_plot_windows(plot_windows)
             best_text = tt_text
             for n, v in zip(fit_params, best):
                 best_text = replace_param(best_text, n, float(v))
             out_model = run_dir / "tt_fitted.pm3.spice"
             out_model.write_text(best_text)
-            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix()))
-            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} saved={out_model}")
+            fit_values = format_param_values(fit_params, best)
+            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix(), fit_values))
+            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} params: {fit_values} saved={out_model}")
 
     print("\n=== Fit summary ===")
-    for ds_key, rep, method, obj, path in summary_rows:
-        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, model={path}")
+    for ds_key, rep, method, obj, path, fit_values in summary_rows:
+        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, params: {fit_values}, model={path}")
 
 
 if __name__ == "__main__":
