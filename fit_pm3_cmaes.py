@@ -307,13 +307,26 @@ def run_ngspice(netlist: Path) -> None:
     subprocess.run(["ngspice", "-b", "-o", str(netlist.with_suffix('.log')), str(netlist)], check=True)
 
 
-def load_wrdata(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray, np.ndarray]:
+    with path.open() as f:
+        header = f.readline().strip().split()
+
+    if not header:
+        raise ValueError(f"Empty wrdata file: {path}")
+
     d = np.loadtxt(path, skiprows=1)
     if d.ndim == 1:
         d = d[None, :]
-    # ngspice wrdata can contain extra columns (duplicated scales / indices).
-    # Use the first column as sweep axis and the last column as target current vector.
-    return d[:, 0], d[:, -1]
+
+    if axis_vec not in header or current_vec not in header:
+        raise ValueError(f"Missing vectors in wrdata header for {path}: header={header}")
+
+    axis_idx = header.index(axis_vec)
+    current_idx = header.index(current_vec)
+    if max(axis_idx, current_idx) >= d.shape[1]:
+        raise ValueError(f"wrdata column mismatch in {path}: header={header}, cols={d.shape[1]}")
+
+    return d[:, axis_idx], d[:, current_idx]
 
 
 def curve_error(meas_x: np.ndarray, meas_i: np.ndarray, sim_x: np.ndarray, sim_i: np.ndarray) -> float:
@@ -339,7 +352,8 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
         netlist = run_dir / f"cand_{idx}_curve_{cidx}.sp"
         netlist.write_text(write_curve_netlist(model, out_csv, curve, geom))
         run_ngspice(netlist)
-        sim_x, sim_i = load_wrdata(out_csv)
+        axis_vec = "V(g)" if curve.sweep_name == "VG" else "V(d)"
+        sim_x, sim_i = load_wrdata(out_csv, axis_vec, "-I(Vd)")
         sim_pairs.append((sim_x, sim_i))
         errs.append(curve_error(curve.sweep, curve.current, sim_x, sim_i))
     mean_err = float(np.mean(errs))
