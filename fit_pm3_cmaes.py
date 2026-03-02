@@ -241,7 +241,10 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
             curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vg, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
-    curves.sort(key=lambda c: c.vd)
+    if sweep_name == "VG":
+        curves.sort(key=lambda c: c.vd)
+    else:
+        curves.sort(key=lambda c: c.vg)
     return curves
 
 
@@ -263,11 +266,6 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     w = fmt(m.group(1))
     l = fmt(m.group(2))
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
-
-def parse_device_geom(dataset_key: str) -> DeviceGeom:
-    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
-    if not m:
-        raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
 
 def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     sweep_start, sweep_stop = float(curve.sweep.min()), float(curve.sweep.max())
@@ -341,7 +339,7 @@ def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray
                 return header_l.index(cl)
         return None
 
-    axis_idx = pick_idx([axis_vec, "v-sweep"])
+    axis_idx = pick_idx([axis_vec])
     current_idx = pick_idx([current_vec])
     if axis_idx is None or current_idx is None:
         raise ValueError(
