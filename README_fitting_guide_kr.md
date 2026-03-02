@@ -31,13 +31,13 @@ python3 -m pip install -r requirements.txt
 ## 실행
 
 ```bash
-python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20
+python3 fit_pm3_cmaes.py --workdir . --iters 20
 
 # Tk UI로 파라미터 체크박스 선택 후 피팅
-python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --ui
+python3 fit_pm3_cmaes.py --workdir . --iters 20 --ui
 
 # CLI로 로우데이터 2개 선택 + 데이터당 2회 반복
-python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --raw-select "w0p36u_l0p15u_m1(8701_9_10),w0p39u_l0p15u_m1(8701_11_12)" --runs-per-dataset 2
+python3 fit_pm3_cmaes.py --workdir . --iters 20 --raw-select "w0p36u_l0p15u_m1(8701_9_10),w0p39u_l0p15u_m1(8701_11_12)" --runs-per-dataset 2
 ```
 
 ## 피팅 파라미터(5개)
@@ -63,3 +63,9 @@ python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --raw-select 
 - `--ui`에서 파라미터 체크박스 + 로우데이터 체크박스를 같이 선택할 수 있습니다.
 - 각 로우데이터마다 반복 횟수(`Runs per dataset`)를 지정해 개별 피팅 결과를 생성합니다.
 - CLI에서는 `--raw-select "<dataset_key1>,<dataset_key2>" --runs-per-dataset N`으로 지정할 수 있습니다.
+
+
+## 실제 피팅 오차 계산
+- 이제 objective는 선택한 MDM(IDVG) 로우데이터의 측정 ID 곡선과 ngspice 시뮬레이션 곡선의 로그 오차(RMSE)로 계산합니다.
+- `clipped 파라미터 vs SS/FF target 값` 비교는 제거되었습니다.
+- `ss_ff_param_bounds.csv`는 초기값/상하한 용도로만 사용됩니다.
