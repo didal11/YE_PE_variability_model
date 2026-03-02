@@ -10,7 +10,100 @@ import cma
 import numpy as np
 
 DEVICE = "sky130_fd_pr__nfet_01v8"
-FIT_PARAMS = ["vth0", "u0", "vsat", "k1", "voff"]
+DEFAULT_FIT_PARAMS = ["vth0", "u0", "vsat", "k1", "voff"]
+
+
+def parse_all_tt_params(model_text: str) -> List[str]:
+    pat = re.compile(r"^\+\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", re.MULTILINE)
+    seen = set()
+    params = []
+    for name in pat.findall(model_text):
+        if name not in seen:
+            seen.add(name)
+            params.append(name)
+    return params
+
+
+def rank_params(params: List[str]) -> List[str]:
+    primary_order = [
+        "vth0", "u0", "vsat", "k1", "voff", "k2", "eta0", "nfactor", "dvt0", "dvt1", "dvt2", "rdsw",
+        "ua", "ub", "uc", "pclm", "pdiblc1", "pdiblc2", "a0", "ags",
+    ]
+    primary_rank = {p: i for i, p in enumerate(primary_order)}
+
+    def score(name: str) -> Tuple[int, int, str]:
+        if name in primary_rank:
+            return (0, primary_rank[name], name)
+        mobility_like = int(any(k in name for k in ["u", "vsat", "ua", "ub", "uc"]))
+        vth_like = int(any(k in name for k in ["vth", "voff", "dvt", "eta", "nfac"]))
+        channel_like = int(any(k in name for k in ["pclm", "pdibl", "rds", "lambda"]))
+        class_rank = - (mobility_like + vth_like + channel_like)
+        return (1, class_rank, name)
+
+    return sorted(params, key=score)
+
+
+def select_params_tk(sorted_params: List[str], default_selected: List[str], available_bounds: set[str]) -> List[str]:
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.title("PM3 Parameter Selection (Tk)")
+    root.geometry("560x720")
+
+    info = tk.Label(
+        root,
+        text="중요도 순 파라미터 목록입니다. 체크된 항목만 피팅됩니다.\n(빨간 항목은 ss_ff_param_bounds.csv에 없어 선택 불가)",
+        justify="left",
+        anchor="w",
+    )
+    info.pack(fill="x", padx=8, pady=8)
+
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True, padx=8, pady=4)
+
+    canvas = tk.Canvas(frame)
+    scrollbar = tk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas)
+
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+
+    checks: Dict[str, tk.BooleanVar] = {}
+    for i, p in enumerate(sorted_params, 1):
+        v = tk.BooleanVar(value=(p in default_selected))
+        checks[p] = v
+        enabled = p in available_bounds
+        cb = tk.Checkbutton(inner, text=f"{i:03d}. {p}", variable=v, anchor="w", justify="left")
+        if not enabled:
+            cb.configure(state="disabled", fg="red")
+            v.set(False)
+        cb.pack(fill="x", padx=4, pady=1)
+
+    selected: List[str] = []
+
+    def on_ok() -> None:
+        selected.extend([p for p, v in checks.items() if v.get()])
+        if not selected:
+            messagebox.showerror("Error", "최소 1개 파라미터를 선택하세요.")
+            selected.clear()
+            return
+        root.destroy()
+
+    def on_cancel() -> None:
+        root.destroy()
+
+    btns = tk.Frame(root)
+    btns.pack(fill="x", padx=8, pady=8)
+    tk.Button(btns, text="확인", command=on_ok).pack(side="left")
+    tk.Button(btns, text="취소", command=on_cancel).pack(side="left", padx=8)
+
+    root.mainloop()
+    return selected
 
 
 def replace_param(model_text: str, param: str, new_value: float) -> str:
@@ -61,15 +154,13 @@ def read_bounds_csv(path: Path) -> Dict[str, Dict[str, float]]:
         for row in r:
             p = row["param"]
             data[p] = {k: float(row[k]) for k in ["tt", "ss", "ff", "lower", "upper"]}
-    for p in FIT_PARAMS:
-        if p not in data:
-            raise ValueError(f"Missing param in CSV: {p}")
     return data
 
 
 def objective(
     x: np.ndarray,
     tt_text: str,
+    fit_params: List[str],
     bounds: List[Tuple[float, float]],
     target_values: np.ndarray,
     scale_values: np.ndarray,
@@ -79,7 +170,7 @@ def objective(
     clipped = np.array([np.clip(v, lo, hi) for v, (lo, hi) in zip(x, bounds)])
 
     text = tt_text
-    for n, v in zip(FIT_PARAMS, clipped):
+    for n, v in zip(fit_params, clipped):
         text = replace_param(text, n, float(v))
 
     model = run_dir / f"cand_{idx}.pm3.spice"
@@ -88,7 +179,6 @@ def objective(
     netlist = run_dir / f"cand_{idx}.sp"
     netlist.write_text(write_iv_netlist(model, out_csv))
 
-    # keep ngspice in the loop for simulate-evaluate-feedback flow
     run_ngspice(netlist)
 
     norm_err = (clipped - target_values) / np.maximum(scale_values, 1e-12)
@@ -100,11 +190,11 @@ def main() -> None:
     ap.add_argument("--workdir", default=".")
     ap.add_argument("--target-corner", choices=["ss", "ff"], default="ss")
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--params", default=",".join(DEFAULT_FIT_PARAMS), help="Comma-separated params to fit")
+    ap.add_argument("--ui", action="store_true", help="Open Tk UI for parameter checkbox selection")
     args = ap.parse_args()
 
     workdir = Path(args.workdir)
-    if not workdir.exists() and (Path("..") / args.workdir).exists():
-        workdir = Path("..") / args.workdir
 
     tt_path = workdir / "tt.pm3.spice"
     bounds_csv = workdir / "ss_ff_param_bounds.csv"
@@ -115,14 +205,30 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     tt_text = tt_path.read_text()
+    all_params = rank_params(parse_all_tt_params(tt_text))
     bounds_data = read_bounds_csv(bounds_csv)
+    available_bounds = set(bounds_data.keys())
+
+    if args.ui:
+        try:
+            fit_params = select_params_tk(all_params, DEFAULT_FIT_PARAMS, available_bounds)
+        except Exception as e:
+            raise RuntimeError("Tk UI failed to open. Check desktop/display environment.") from e
+        if not fit_params:
+            raise RuntimeError("No parameters selected in UI.")
+    else:
+        fit_params = [p.strip() for p in args.params.split(",") if p.strip()]
+
+    missing = [p for p in fit_params if p not in available_bounds]
+    if missing:
+        raise ValueError(f"Selected params not present in ss_ff_param_bounds.csv: {missing}")
 
     bounds: List[Tuple[float, float]] = []
     x0: List[float] = []
     target_values: List[float] = []
     scale_values: List[float] = []
 
-    for p in FIT_PARAMS:
+    for p in fit_params:
         lo = bounds_data[p]["lower"]
         hi = bounds_data[p]["upper"]
         if np.isclose(lo, hi):
@@ -148,22 +254,23 @@ def main() -> None:
         xs = es.ask()
         fs = []
         for x in xs:
-            fs.append(objective(np.array(x), tt_text, bounds, target_arr, scale_arr, run_dir, counter))
+            fs.append(objective(np.array(x), tt_text, fit_params, bounds, target_arr, scale_arr, run_dir, counter))
             counter += 1
         es.tell(xs, fs)
         es.disp()
 
     best = np.array(es.result.xbest)
     best_text = tt_text
-    for n, v in zip(FIT_PARAMS, best):
+    for n, v in zip(fit_params, best):
         best_text = replace_param(best_text, n, float(v))
 
     out_model = run_dir / "tt_fitted.pm3.spice"
     out_model.write_text(best_text)
 
     print("Best objective:", es.result.fbest)
+    print("Selected params:", ", ".join(fit_params))
     print("Best params:")
-    for n, v in zip(FIT_PARAMS, best):
+    for n, v in zip(fit_params, best):
         print(f"  {n} = {v:.8e}")
     print(f"Saved fitted model: {out_model}")
 

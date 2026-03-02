@@ -30,6 +30,9 @@ python3 -m pip install -r requirements.txt
 
 ```bash
 python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20
+
+# Tk UI로 파라미터 체크박스 선택 후 피팅
+python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20 --ui
 ```
 
 ## 피팅 파라미터(5개)
@@ -41,3 +44,9 @@ python3 fit_pm3_cmaes.py --workdir . --target-corner ss --iters 20
 - `voff`
 
 > 미스매치 항은 제외합니다.
+
+
+## UI 기능
+- `--ui` 옵션 사용 시 `tt.pm3.spice`의 파라미터를 중요도 순으로 나열한 Tk 체크박스 창이 열립니다.
+- 체크된 파라미터만 피팅 대상으로 사용됩니다.
+- 현재 `ss_ff_param_bounds.csv`에 있는 파라미터만 선택 가능합니다.
