@@ -241,7 +241,10 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
             curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vg, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
-    curves.sort(key=lambda c: c.vd)
+    if sweep_name == "VG":
+        curves.sort(key=lambda c: c.vd)
+    else:
+        curves.sort(key=lambda c: c.vg)
     return curves
 
 
@@ -264,11 +267,6 @@ def parse_device_geom(dataset_key: str) -> DeviceGeom:
     l = fmt(m.group(2))
     return DeviceGeom(w=w, l=l, m=int(m.group(3)))
 
-def parse_device_geom(dataset_key: str) -> DeviceGeom:
-    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
-    if not m:
-        raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
-
 def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     sweep_start, sweep_stop = float(curve.sweep.min()), float(curve.sweep.max())
     step = float(np.median(np.diff(np.unique(curve.sweep)))) if len(np.unique(curve.sweep)) > 1 else 0.05
@@ -279,12 +277,12 @@ def write_curve_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: 
         v_d = curve.vd
         v_g = sweep_start
         dc_line = f"dc Vg {sweep_start} {sweep_stop} {step}"
-        wr_line = f"wrdata {out_csv.as_posix()} V(g) -I(Vd)"
+        wr_line = f"wrdata {out_csv.as_posix()} V(g) I(Vd)"
     elif curve.sweep_name == "VD":
         v_d = sweep_start
         v_g = curve.vg
         dc_line = f"dc Vd {sweep_start} {sweep_stop} {step}"
-        wr_line = f"wrdata {out_csv.as_posix()} V(d) -I(Vd)"
+        wr_line = f"wrdata {out_csv.as_posix()} V(d) I(Vd)"
     else:
         raise ValueError(f"Unsupported sweep type: {curve.sweep_name}")
 
@@ -341,8 +339,15 @@ def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray
                 return header_l.index(cl)
         return None
 
-    axis_idx = pick_idx([axis_vec, "v-sweep"])
+    axis_idx = pick_idx([axis_vec])
     current_idx = pick_idx([current_vec])
+
+    # ngspice may emit only `v-sweep` and current (without explicit V(g)/V(d)
+    # column name) when writing sweeps with wr_singlescale.
+    if axis_idx is None and current_idx is not None and len(effective_header) == d.shape[1] == 2:
+        if effective_header[0].lower() == "v-sweep":
+            axis_idx = 0
+
     if axis_idx is None or current_idx is None:
         raise ValueError(
             f"Missing vectors in wrdata header for {path}: header={effective_header}, "
@@ -376,7 +381,8 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
         netlist.write_text(write_curve_netlist(model, out_csv, curve, geom))
         run_ngspice(netlist)
         axis_vec = "V(g)" if curve.sweep_name == "VG" else "V(d)"
-        sim_x, sim_i = load_wrdata(out_csv, axis_vec, "-I(Vd)")
+        sim_x, sim_i_raw = load_wrdata(out_csv, axis_vec, "I(Vd)")
+        sim_i = -sim_i_raw
         sim_pairs.append((sim_x, sim_i))
         errs.append(curve_error(curve.sweep, curve.current, sim_x, sim_i))
     mean_err = float(np.mean(errs))
