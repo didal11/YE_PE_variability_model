@@ -318,11 +318,23 @@ def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray
     if d.ndim == 1:
         d = d[None, :]
 
-    if axis_vec not in header or current_vec not in header:
-        raise ValueError(f"Missing vectors in wrdata header for {path}: header={header}")
+    header_l = [h.lower() for h in header]
 
-    axis_idx = header.index(axis_vec)
-    current_idx = header.index(current_vec)
+    def pick_idx(candidates: List[str]) -> int | None:
+        for c in candidates:
+            cl = c.lower()
+            if cl in header_l:
+                return header_l.index(cl)
+        return None
+
+    axis_idx = pick_idx([axis_vec, "v-sweep"])
+    current_idx = pick_idx([current_vec])
+    if axis_idx is None or current_idx is None:
+        raise ValueError(
+            f"Missing vectors in wrdata header for {path}: header={header}, "
+            f"expected_axis={axis_vec}, expected_current={current_vec}"
+        )
+
     if max(axis_idx, current_idx) >= d.shape[1]:
         raise ValueError(f"wrdata column mismatch in {path}: header={header}, cols={d.shape[1]}")
 
