@@ -190,7 +190,7 @@ def read_bounds_csv(path: Path) -> Dict[str, Dict[str, float]]:
     return data
 
 
-def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> List[MdmCurve]:
+def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> List[MdmCurve]:
     with zipfile.ZipFile(raw_zip, "r") as zf:
         txt = zf.read(mdm_path).decode(errors="ignore")
     blocks = txt.split("BEGIN_DB")
@@ -217,10 +217,17 @@ def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> List[MdmCurve]:
                     pass
         if data:
             arr = np.array(data)
-            curves.append(MdmCurve("VG", arr[:, 0], arr[:, 1], vd, vb, vs))
+            curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
     curves.sort(key=lambda c: c.vd)
+    return curves
+
+
+def load_dataset_curves(raw_zip: Path, ds: RawDataset) -> List[MdmCurve]:
+    curves = parse_mdm_curves_from_zip(raw_zip, ds.idvg_path, "VG")
+    if ds.idvd_path:
+        curves.extend(parse_mdm_curves_from_zip(raw_zip, ds.idvd_path, "VD"))
     return curves
 
 
@@ -298,7 +305,9 @@ def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[T
 
 
 def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curves: List[MdmCurve], geom: DeviceGeom) -> Tuple[np.ndarray, float, str]:
-    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}, biases={len(curves)}")
+    n_idvg = sum(1 for c in curves if c.sweep_name == "VG")
+    n_idvd = sum(1 for c in curves if c.sweep_name == "VD")
+    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}, biases(total={len(curves)}, idvg={n_idvg}, idvd={n_idvd})")
     bounds, x0, free_params = [], [], []
     fixed_params: Dict[str, float] = {}
     for p in fit_params:
@@ -398,7 +407,7 @@ def main() -> None:
         if ds_key not in raw_lookup:
             raise ValueError(f"Unknown raw dataset key: {ds_key}")
         geom = parse_device_geom(ds_key)
-        curves = parse_mdm_idvg_from_zip(Path(args.raw_zip), raw_lookup[ds_key].idvg_path)
+        curves = load_dataset_curves(Path(args.raw_zip), raw_lookup[ds_key])
         for rep in range(1, runs_per_ds + 1):
             tag = re.sub(r"[^a-zA-Z0-9_.-]+", "_", f"{ds_key}_run{rep}")
             run_dir = workdir / f"work_{DEVICE}" / tag
