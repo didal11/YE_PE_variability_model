@@ -309,7 +309,11 @@ def run_ngspice(netlist: Path) -> None:
 
 def load_wrdata(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     d = np.loadtxt(path, skiprows=1)
-    return d[:, 0], d[:, 1]
+    if d.ndim == 1:
+        d = d[None, :]
+    # ngspice wrdata can contain extra columns (duplicated scales / indices).
+    # Use the first column as sweep axis and the last column as target current vector.
+    return d[:, 0], d[:, -1]
 
 
 def curve_error(meas_x: np.ndarray, meas_i: np.ndarray, sim_x: np.ndarray, sim_i: np.ndarray) -> float:
