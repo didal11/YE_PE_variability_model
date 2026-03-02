@@ -241,7 +241,10 @@ def parse_mdm_curves_from_zip(raw_zip: Path, mdm_path: str, sweep_name: str) -> 
             curves.append(MdmCurve(sweep_name, arr[:, 0], arr[:, 1], vd, vg, vb, vs))
     if not curves:
         raise ValueError(f"No curve parsed from {mdm_path}")
-    curves.sort(key=lambda c: c.vd)
+    if sweep_name == "VG":
+        curves.sort(key=lambda c: c.vd)
+    else:
+        curves.sort(key=lambda c: c.vg)
     return curves
 
 
@@ -336,7 +339,7 @@ def load_wrdata(path: Path, axis_vec: str, current_vec: str) -> Tuple[np.ndarray
                 return header_l.index(cl)
         return None
 
-    axis_idx = pick_idx([axis_vec, "v-sweep"])
+    axis_idx = pick_idx([axis_vec])
     current_idx = pick_idx([current_vec])
     if axis_idx is None or current_idx is None:
         raise ValueError(
