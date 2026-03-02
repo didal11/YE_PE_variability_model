@@ -33,6 +33,13 @@ class MdmCurve:
     vs: float
 
 
+@dataclass
+class DeviceGeom:
+    w: str
+    l: str
+    m: int
+
+
 def discover_raw_datasets(raw_zip: Path) -> List[RawDataset]:
     if not raw_zip.exists():
         return []
@@ -201,7 +208,20 @@ def parse_mdm_idvg_from_zip(raw_zip: Path, mdm_path: str) -> MdmCurve:
     return curves[-1]
 
 
-def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve) -> str:
+def parse_device_geom(dataset_key: str) -> DeviceGeom:
+    m = re.search(r"w([0-9]+(?:p[0-9]+)?)u_l([0-9]+(?:p[0-9]+)?)u_m([0-9]+)", dataset_key)
+    if not m:
+        raise ValueError(f"Failed to parse geometry from dataset key: {dataset_key}")
+
+    def fmt(tok: str) -> str:
+        return f"{tok.replace('p', '.')}u"
+
+    w = fmt(m.group(1))
+    l = fmt(m.group(2))
+    return DeviceGeom(w=w, l=l, m=int(m.group(3)))
+
+
+def write_idvg_netlist(model_file: Path, out_csv: Path, curve: MdmCurve, geom: DeviceGeom) -> str:
     vg_start, vg_stop = float(curve.sweep.min()), float(curve.sweep.max())
     step = float(np.median(np.diff(np.unique(curve.sweep)))) if len(np.unique(curve.sweep)) > 1 else 0.05
     if step <= 0:
@@ -213,7 +233,7 @@ Vd d 0 {curve.vd}
 Vg g 0 {vg_start}
 Vs s 0 {curve.vs}
 Vb b 0 {curve.vb}
-X1 d g s b {DEVICE} l=0.15u w=1u
+X1 d g s b {DEVICE} l={geom.l} w={geom.w} m={geom.m}
 .control
 set wr_vecnames
 set wr_singlescale
@@ -241,52 +261,73 @@ def curve_error(meas_x: np.ndarray, meas_i: np.ndarray, sim_x: np.ndarray, sim_i
     return float(np.sqrt(np.mean((np.log10(np.abs(si_interp) + 1e-15) - np.log10(np.abs(meas_i) + 1e-15)) ** 2)))
 
 
-def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curve: MdmCurve) -> float:
+def objective(x: np.ndarray, tt_text: str, fit_params: List[str], bounds: List[Tuple[float, float]], run_dir: Path, idx: int, curve: MdmCurve, geom: DeviceGeom, fixed_params: Dict[str, float]) -> float:
     clipped = np.array([np.clip(v, lo, hi) for v, (lo, hi) in zip(x, bounds)])
     text = tt_text
+    for n, v in fixed_params.items():
+        text = replace_param(text, n, float(v))
     for n, v in zip(fit_params, clipped):
         text = replace_param(text, n, float(v))
     model = run_dir / f"cand_{idx}.pm3.spice"
     model.write_text(text)
     out_csv = run_dir / f"cand_{idx}.csv"
     netlist = run_dir / f"cand_{idx}.sp"
-    netlist.write_text(write_idvg_netlist(model, out_csv, curve))
+    netlist.write_text(write_idvg_netlist(model, out_csv, curve, geom))
     run_ngspice(netlist)
     sim_x, sim_i = load_wrdata(out_csv)
     return curve_error(curve.sweep, curve.current, sim_x, sim_i)
 
 
-def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curve: MdmCurve) -> Tuple[np.ndarray, float, str]:
-    bounds, x0 = [], []
+def run_fit_once(tt_text: str, fit_params: List[str], bounds_data: Dict[str, Dict[str, float]], run_dir: Path, iters: int, curve: MdmCurve, geom: DeviceGeom) -> Tuple[np.ndarray, float, str]:
+    print(f"[{run_dir.name}] geometry w={geom.w}, l={geom.l}, m={geom.m}")
+    bounds, x0, free_params = [], [], []
+    fixed_params: Dict[str, float] = {}
     for p in fit_params:
         lo, hi = bounds_data[p]["lower"], bounds_data[p]["upper"]
+        tt = np.clip(bounds_data[p]["tt"], lo, hi)
         if np.isclose(lo, hi):
-            eps = max(abs(lo) * 1e-3, 1e-9)
-            lo, hi = lo - eps, hi + eps
+            fixed_params[p] = float(tt)
+            continue
+        free_params.append(p)
         bounds.append((lo, hi))
-        x0.append(np.clip(bounds_data[p]["tt"], lo, hi))
+        x0.append(tt)
 
-    if len(fit_params) == 1:
+    print(f"[{run_dir.name}] free params: {free_params}, fixed params: {sorted(fixed_params.keys())}")
+
+    if not free_params:
+        f = objective(np.array([]), tt_text, [], [], run_dir, 0, curve, geom, fixed_params)
+        return np.array([fixed_params[p] for p in fit_params], dtype=float), f, "fixed-params"
+
+    if len(free_params) == 1:
         lo, hi = bounds[0]
         xs = np.linspace(lo, hi, max(7, iters * 4))
         bf, bx = float("inf"), xs[0]
         for i, x in enumerate(xs):
-            f = objective(np.array([x]), tt_text, fit_params, bounds, run_dir, i, curve)
+            f = objective(np.array([x]), tt_text, free_params, bounds, run_dir, i, curve, geom, fixed_params)
             if f < bf:
                 bf, bx = f, x
-        return np.array([bx]), bf, "grid-1d"
+        best_map = {**fixed_params, free_params[0]: float(bx)}
+        return np.array([best_map[p] for p in fit_params], dtype=float), bf, "grid-1d"
 
-    es = cma.CMAEvolutionStrategy(np.array(x0, dtype=float), 0.1, {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": iters})
+    spans = [hi - lo for lo, hi in bounds]
+    sigma0 = max(min(spans) * 0.25, 1e-6)
+    es = cma.CMAEvolutionStrategy(np.array(x0, dtype=float), sigma0, {"bounds": [[b[0] for b in bounds], [b[1] for b in bounds]], "maxiter": iters})
     idx = 0
     while not es.stop():
         xs = es.ask()
         fs = []
         for x in xs:
-            fs.append(objective(np.array(x), tt_text, fit_params, bounds, run_dir, idx, curve))
+            fs.append(objective(np.array(x), tt_text, free_params, bounds, run_dir, idx, curve, geom, fixed_params))
             idx += 1
         es.tell(xs, fs)
         es.disp()
-    return np.array(es.result.xbest), float(es.result.fbest), "cma-es"
+    best_map = {**fixed_params}
+    best_map.update({n: float(v) for n, v in zip(free_params, es.result.xbest)})
+    return np.array([best_map[p] for p in fit_params], dtype=float), float(es.result.fbest), "cma-es"
+
+
+def format_param_values(names: List[str], values: np.ndarray) -> str:
+    return ", ".join(f"{n}={float(v):.8e}" for n, v in zip(names, values))
 
 
 def main() -> None:
@@ -333,23 +374,25 @@ def main() -> None:
     for ds_key in selected_raw:
         if ds_key not in raw_lookup:
             raise ValueError(f"Unknown raw dataset key: {ds_key}")
+        geom = parse_device_geom(ds_key)
         curve = parse_mdm_idvg_from_zip(Path(args.raw_zip), raw_lookup[ds_key].idvg_path)
         for rep in range(1, runs_per_ds + 1):
             tag = re.sub(r"[^a-zA-Z0-9_.-]+", "_", f"{ds_key}_run{rep}")
             run_dir = workdir / f"work_{DEVICE}" / tag
             run_dir.mkdir(parents=True, exist_ok=True)
-            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curve)
+            best, best_obj, method = run_fit_once(tt_text, fit_params, bounds_data, run_dir, args.iters, curve, geom)
             best_text = tt_text
             for n, v in zip(fit_params, best):
                 best_text = replace_param(best_text, n, float(v))
             out_model = run_dir / "tt_fitted.pm3.spice"
             out_model.write_text(best_text)
-            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix()))
-            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} saved={out_model}")
+            fit_values = format_param_values(fit_params, best)
+            summary_rows.append((ds_key, rep, method, best_obj, out_model.as_posix(), fit_values))
+            print(f"[{ds_key} #{rep}] objective={best_obj:.6e} method={method} params: {fit_values} saved={out_model}")
 
     print("\n=== Fit summary ===")
-    for ds_key, rep, method, obj, path in summary_rows:
-        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, model={path}")
+    for ds_key, rep, method, obj, path, fit_values in summary_rows:
+        print(f"{ds_key}, run={rep}, method={method}, objective={obj:.6e}, params: {fit_values}, model={path}")
 
 
 if __name__ == "__main__":
