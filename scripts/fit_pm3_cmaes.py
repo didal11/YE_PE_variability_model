@@ -109,7 +109,7 @@ def main() -> None:
     tt_path = workdir / "tt.pm3.spice"
     bounds_csv = workdir / "ss_ff_param_bounds.csv"
     if not tt_path.exists() or not bounds_csv.exists():
-        raise FileNotFoundError("Missing inputs. Run scripts/prepare_pm3_subset.py first.")
+        raise FileNotFoundError("Missing inputs: extracted_models/tt.pm3.spice and extracted_models/ss_ff_param_bounds.csv must exist.")
 
     run_dir = workdir / f"work_{DEVICE}"
     run_dir.mkdir(parents=True, exist_ok=True)
