@@ -99,9 +99,11 @@ def inject_missing_monte_params(model_text: str) -> str:
 
 
 def run_ngspice(netlist: str, cwd: Path) -> None:
+    print(f"[ngspice] start: {cwd / netlist}", flush=True)
     p = subprocess.run(["ngspice", "-b", "-o", "ngspice.log", netlist], cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(f"ngspice 실패: {p.stderr}\n{p.stdout}")
+    print(f"[ngspice] done : {cwd / netlist}", flush=True)
 
 
 def load_wrdata(path: Path) -> pd.DataFrame:
@@ -302,12 +304,15 @@ def make_scope_doc(path: Path) -> None:
 
 def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, outdir: Path) -> pd.DataFrame:
     rows = []
+    print("[progress] baseline(TT) simulation", flush=True)
     with tempfile.TemporaryDirectory() as td:
         base_model = Path(td) / "tt.spice"
         base_model.write_text(tt_text)
         base_metrics = simulate_metrics(base_model, cfg, Path(td))
 
-    for param in PARAMS_150:
+    total = len(PARAMS_150)
+    for idx_param, param in enumerate(PARAMS_150, start=1):
+        print(f"[progress] param {idx_param}/{total}: {param}", flush=True)
         row = {"param": param}
         for m in METRICS_ORDER:
             row[f"{m}_sens_SS_5pt"] = np.nan
@@ -315,8 +320,10 @@ def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, o
             row[f"{m}_sens_avg_5pt"] = np.nan
 
         for corner_name, corner_text in (("SS", ss_text), ("FF", ff_text)):
+            print(f"[progress]   corner={corner_name}", flush=True)
             metrics_samples = [base_metrics]
             for alpha in (0.25, 0.5, 0.75, 1.0):
+                print(f"[progress]     alpha={alpha}", flush=True)
                 patched = patch_param_alpha(tt_text, corner_text, param, alpha)
                 with tempfile.TemporaryDirectory() as td:
                     mp = Path(td) / f"{param}_{corner_name}_{alpha}.spice"
