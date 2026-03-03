@@ -68,6 +68,15 @@ def get_param_values(model_text: str, param: str) -> List[float]:
     return vals
 
 
+
+
+def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
+    try:
+        vals = get_param_values(model_text, "tnom")
+        return float(vals[0])
+    except ValueError:
+        return float(fallback_c)
+
 def patch_param_alpha(tt_text: str, corner_text: str, param: str, alpha: float) -> str:
     tt_vals = get_param_values(tt_text, param)
     c_vals = get_param_values(corner_text, param)
@@ -136,11 +145,18 @@ def interp_x_for_y(x: np.ndarray, y: np.ndarray, target: float) -> float:
     return x0 + (target - y0) * (x1 - x0) / (y1 - y0)
 
 
-def calc_ss(vg: np.ndarray, id_abs: np.ndarray) -> float:
-    mask = id_abs > 1e-18
-    vg2 = vg[mask]
-    lid = np.log10(id_abs[mask])
-    return 1.0 / np.max(np.gradient(lid, vg2))
+def calc_ss(vg: np.ndarray, id_abs: np.ndarray, id_target: float) -> float:
+    lo = id_target / 100.0
+    hi = id_target / 10.0
+    mask = (id_abs >= lo) & (id_abs <= hi)
+    if np.count_nonzero(mask) < 3:
+        raise ValueError("SS 추출용 전류창 데이터가 부족합니다.")
+    vg_w = vg[mask]
+    logid_w = np.log10(np.clip(id_abs[mask], 1e-30, None))
+    slope, _ = np.polyfit(vg_w, logid_w, 1)
+    if slope <= 0:
+        raise ValueError("SS 추출 slope가 비정상입니다.")
+    return float(1.0 / slope)
 
 
 def deriv(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -156,6 +172,22 @@ def interp_y_for_x_sorted(x: np.ndarray, y: np.ndarray, target_x: float) -> floa
     if target_x < uniq_x[0] or target_x > uniq_x[-1]:
         raise ValueError(f"보간 타겟 {target_x}가 데이터 범위를 벗어났습니다.")
     return float(np.interp(target_x, uniq_x, uniq_y))
+
+
+
+
+def extract_vdsat_knee(vd: np.ndarray, idvd: np.ndarray) -> float:
+    fit_mask = (vd >= 0.01) & (vd <= 0.1)
+    if np.count_nonzero(fit_mask) < 3:
+        raise ValueError("Vdsat_knee 선형영역 데이터 부족")
+    a, b = np.polyfit(vd[fit_mask], idvd[fit_mask], 1)
+    id_lin = a * vd + b
+    chk_mask = vd >= 0.1
+    err = np.abs(idvd[chk_mask] - id_lin[chk_mask]) / np.clip(np.abs(id_lin[chk_mask]), 1e-30, None)
+    idx = np.where(err > 0.1)[0]
+    if len(idx) == 0:
+        raise ValueError("Vdsat_knee 추출 실패")
+    return float(vd[chk_mask][idx[0]])
 
 
 def simulate_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
@@ -238,8 +270,8 @@ quit
     icrit_short = cfg.icrit * (cfg.w_wide / cfg.l_short)
     vth_low = interp_x_for_y(vg_l, id_l, icrit_long)
     vth_high = interp_x_for_y(vg_h, id_h, icrit_long)
-    ss_long = calc_ss(vg_h, np.abs(id_h))
-    ss_short = calc_ss(vg_sh, np.abs(id_sh))
+    ss_long = calc_ss(vg_h, np.abs(id_h), icrit_long)
+    ss_short = calc_ss(vg_sh, np.abs(id_sh), icrit_short)
     ioff = float(np.interp(0.0, vg_h, id_h))
     voff_index = float(np.log10(max(abs(ioff), 1e-30)))
     n_eff = ss_long / (math.log(10) * 0.02585)
@@ -255,7 +287,7 @@ quit
     return {
         "Vth_lowVds": vth_low,
         "Vth_highVds": vth_high,
-        "DIBL": (vth_high - vth_low) / (cfg.vdd - cfg.vds_low),
+        "DIBL": (vth_low - vth_high) / (cfg.vdd - cfg.vds_low),
         "SS_longL": ss_long,
         "SS_shortL": ss_short,
         "Ioff_ref": ioff,
@@ -269,7 +301,7 @@ quit
         "Vg_at_gm_max": float(vg_h[np.argmax(gm)]),
         "gm_over_Id_weak": interp_y_for_x_sorted(id_h, gm_id, icrit_long),
         "gm_over_Id_mod": interp_y_for_x_sorted(id_h, gm_id, 10 * icrit_long),
-        "Vdsat_knee": float(vd[np.where(gds < 0.1 * gds[0])[0][0]]),
+        "Vdsat_knee": extract_vdsat_knee(vd, idvd),
         "gds_sat": gds_sat,
         "ro_sat": 1.0 / gds_sat,
         "gds_Vds_sens": (float(np.interp(cfg.vdd, vd, gds)) - float(np.interp(0.8 * cfg.vdd, vd, gds))) / (0.2 * cfg.vdd),
@@ -281,7 +313,7 @@ quit
         "SS_rolloff_L": ss_short - ss_long,
         "Ion_rolloff_L_ratio": float(np.interp(cfg.vdd, vd_s, idvd_s)) / ion,
         "Vth_narrowW": interp_x_for_y(vg_n, id_n, cfg.icrit * (cfg.w_narrow / cfg.l_long)) - vth_high,
-        "SS_narrowW": calc_ss(vg_n, np.abs(id_n)) - ss_long,
+        "SS_narrowW": calc_ss(vg_n, np.abs(id_n), cfg.icrit * (cfg.w_narrow / cfg.l_long)) - ss_long,
         "Ron_narrowW_ratio": (cfg.vds_low / float(np.interp(cfg.vds_low, vd_nw, idvd_nw))) / (cfg.vds_low / idlin),
         "GIDL_index": float(np.interp(cfg.gidl_vg_start, vg_gidl, gidl_i)),
         "Junc_leak_index": float(np.interp(-0.5, vd_j, id_j)),
@@ -319,8 +351,15 @@ def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, o
             row[f"{m}_sens_FF_5pt"] = np.nan
             row[f"{m}_sens_avg_5pt"] = np.nan
 
+        tt_vals = get_param_values(tt_text, param)
+        p0 = float(np.mean(tt_vals))
         for corner_name, corner_text in (("SS", ss_text), ("FF", ff_text)):
             print(f"[progress]   corner={corner_name}", flush=True)
+            c_vals = get_param_values(corner_text, param)
+            n = min(len(tt_vals), len(c_vals))
+            if n == 0:
+                raise ValueError(f"{param} corner 값이 없습니다.")
+            dp = float(np.mean(np.array(c_vals[:n]) - np.array(tt_vals[:n])))
             metrics_samples = [base_metrics]
             for alpha in (0.25, 0.5, 0.75, 1.0):
                 print(f"[progress]     alpha={alpha}", flush=True)
@@ -333,7 +372,12 @@ def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, o
                 dfdalpha = five_point_forward(
                     metrics_samples[0][m], metrics_samples[1][m], metrics_samples[2][m], metrics_samples[3][m], metrics_samples[4][m], 0.25
                 )
-                row[f"{m}_sens_{corner_name}_5pt"] = dfdalpha
+                m0 = base_metrics[m]
+                if dp == 0 or m0 == 0:
+                    row[f"{m}_sens_{corner_name}_5pt"] = np.nan
+                else:
+                    dmdp = dfdalpha / dp
+                    row[f"{m}_sens_{corner_name}_5pt"] = (p0 / m0) * dmdp
 
         for m in METRICS_ORDER:
             v = [row[f"{m}_sens_SS_5pt"], row[f"{m}_sens_FF_5pt"]]
@@ -365,7 +409,10 @@ def main() -> None:
     tt_text = inject_missing_monte_params(tt_text)
     ss_text = inject_missing_monte_params(ss_text)
     ff_text = inject_missing_monte_params(ff_text)
-    df = run_sensitivity(tt_text, ss_text, ff_text, BiasConfig(), args.outdir)
+    cfg = BiasConfig()
+    cfg.temp = get_tnom_celsius(tt_text, fallback_c=27.0)
+    print(f"[config] temp set from TNOM: {cfg.temp}C", flush=True)
+    df = run_sensitivity(tt_text, ss_text, ff_text, cfg, args.outdir)
     print(df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
 
 
