@@ -41,7 +41,7 @@ class BiasConfig:
     vg_max: float = 1.8
     vg_step: float = 0.01
     vd_step: float = 0.01
-    vdd_minus_delta: float = 1.6
+    delta_vg: float = 0.2
     icrit: float = 1e-7
     gidl_vg_start: float = -0.4
     gidl_vg_stop: float = 0.0
@@ -212,12 +212,20 @@ alter Vd {cfg.vdd}
 dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
 wrdata idvg_high.dat v(g) i(Vd)
 altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_short}
+alter Vd {cfg.vdd}
 dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
 wrdata idvg_short_high.dat v(g) i(Vd)
+alter Vd {cfg.vds_low}
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_short_low.dat v(g) i(Vd)
 altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_long}
 altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_narrow}
+alter Vd {cfg.vdd}
 dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
 wrdata idvg_narrow_high.dat v(g) i(Vd)
+alter Vd {cfg.vds_low}
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_narrow_low.dat v(g) i(Vd)
 altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_wide}
 alter Vg {cfg.vdd}
 dc Vd 0 {cfg.vdd} {cfg.vd_step}
@@ -232,7 +240,7 @@ dc Vd 0 {cfg.vdd} {cfg.vd_step}
 wrdata idvd_narrow_vdd.dat v(d) i(Vd)
 altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_long}
 altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_wide}
-alter Vg {cfg.vdd_minus_delta}
+alter Vg {cfg.vdd - cfg.delta_vg}
 dc Vd 0 {cfg.vds_low} {cfg.vd_step}
 wrdata idvd_vddm_lin.dat v(d) i(Vd)
 alter Vd {cfg.vdd}
@@ -243,7 +251,7 @@ wrdata gidl_vg.dat v(g) i(Vd)
 alter Vg 0
 alter Vs 0
 alter Vb 0
-dc Vd 0 -0.5 -0.05
+dc Vd 0 0.5 0.05
 wrdata junc.dat v(d) i(Vd)
 quit
 .endc
@@ -259,7 +267,9 @@ quit
     vg_l, id_l = read_xy("idvg_low.dat")
     vg_h, id_h = read_xy("idvg_high.dat")
     vg_sh, id_sh = read_xy("idvg_short_high.dat")
+    vg_sh_low, id_sh_low = read_xy("idvg_short_low.dat")
     vg_n, id_n = read_xy("idvg_narrow_high.dat")
+    vg_n_low, id_n_low = read_xy("idvg_narrow_low.dat")
     vd, idvd = read_xy("idvd_vdd.dat")
     vd_s, idvd_s = read_xy("idvd_short_vdd.dat")
     vd_nw, idvd_nw = read_xy("idvd_narrow_vdd.dat")
@@ -270,8 +280,8 @@ quit
     icrit_short = cfg.icrit * (cfg.w_wide / cfg.l_short)
     vth_low = interp_x_for_y(vg_l, id_l, icrit_long)
     vth_high = interp_x_for_y(vg_h, id_h, icrit_long)
-    ss_long = calc_ss(vg_h, np.abs(id_h), icrit_long)
-    ss_short = calc_ss(vg_sh, np.abs(id_sh), icrit_short)
+    ss_long = calc_ss(vg_l, np.abs(id_l), icrit_long)
+    ss_short = calc_ss(vg_sh_low, np.abs(id_sh_low), icrit_short)
     ioff = float(np.interp(0.0, vg_h, id_h))
     voff_index = float(np.log10(max(abs(ioff), 1e-30)))
     n_eff = ss_long / (math.log(10) * 0.02585)
@@ -313,10 +323,10 @@ quit
         "SS_rolloff_L": ss_short - ss_long,
         "Ion_rolloff_L_ratio": float(np.interp(cfg.vdd, vd_s, idvd_s)) / ion,
         "Vth_narrowW": interp_x_for_y(vg_n, id_n, cfg.icrit * (cfg.w_narrow / cfg.l_long)) - vth_high,
-        "SS_narrowW": calc_ss(vg_n, np.abs(id_n), cfg.icrit * (cfg.w_narrow / cfg.l_long)) - ss_long,
+        "SS_narrowW": calc_ss(vg_n_low, np.abs(id_n_low), cfg.icrit * (cfg.w_narrow / cfg.l_long)) - ss_long,
         "Ron_narrowW_ratio": (cfg.vds_low / float(np.interp(cfg.vds_low, vd_nw, idvd_nw))) / (cfg.vds_low / idlin),
         "GIDL_index": float(np.interp(cfg.gidl_vg_start, vg_gidl, gidl_i)),
-        "Junc_leak_index": float(np.interp(-0.5, vd_j, id_j)),
+        "Junc_leak_index": float(np.interp(0.5, vd_j, id_j)),
     }
 
 
