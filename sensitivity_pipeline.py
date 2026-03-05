@@ -129,6 +129,13 @@ def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
     common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
     return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
 
+def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
+    tt_map = build_param_map(tt_text)
+    ss_map = build_param_map(ss_text)
+    ff_map = build_param_map(ff_text)
+    common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
+    return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
+
 def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
     try:
         vals = get_param_values(model_text, "tnom")
