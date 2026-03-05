@@ -65,6 +65,31 @@ FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 ASSIGN_RE = re.compile(r"(\b[a-zA-Z_]\w*\b)\s*=\s*([^\s]+)")
 
 
+def strip_dot_end_cards(model_text: str) -> str:
+    lines = []
+    for line in model_text.splitlines():
+        if line.strip().lower() == ".end":
+            continue
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def merge_model_texts(primary_text: str, secondary_text: str) -> str:
+    return strip_dot_end_cards(primary_text) + "\n" + strip_dot_end_cards(secondary_text)
+
+
+def build_param_map(model_text: str) -> Dict[str, List[float]]:
+    values: Dict[str, List[float]] = {}
+    for m in ASSIGN_RE.finditer(model_text):
+        key = m.group(1).lower()
+        try:
+            num = parse_num(m.group(2))
+        except ValueError:
+            continue
+        values.setdefault(key, []).append(num)
+    return values
+
+
 def parse_num(token: str) -> float:
     m = FLOAT_RE.search(token)
     if not m:
@@ -73,16 +98,23 @@ def parse_num(token: str) -> float:
 
 
 def get_param_values(model_text: str, param: str) -> List[float]:
-    vals = []
-    for m in ASSIGN_RE.finditer(model_text):
-        if m.group(1).lower() == param.lower():
-            vals.append(parse_num(m.group(2)))
+    val_map = build_param_map(model_text)
+    vals = val_map.get(param.lower(), [])
     if not vals:
         raise ValueError(f"파라미터 '{param}'를 찾지 못했습니다.")
     return vals
 
 
+def get_all_params(model_text: str) -> List[str]:
+    return list(build_param_map(model_text).keys())
 
+
+def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
+    tt_map = build_param_map(tt_text)
+    ss_map = build_param_map(ss_text)
+    ff_map = build_param_map(ff_text)
+    common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
+    return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
 
 
 
@@ -144,8 +176,11 @@ def patch_param_alpha(tt_text: str, corner_text: str, param: str, alpha: float) 
 
 
 def inject_missing_monte_params(model_text: str) -> str:
-    slope_names = sorted(set(re.findall(r"(sky130_fd_pr__\w+__\w*slope\w*)", model_text)))
-    lines = [".param MC_MM_SWITCH = 0"] + [f".param {name} = 0.0" for name in slope_names]
+    assigned = {m.group(1) for m in ASSIGN_RE.finditer(model_text)}
+    referenced = set(re.findall(r"(sky130_fd_pr__\w+__\w+)", model_text))
+    slope_names = set(re.findall(r"(sky130_fd_pr__\w+__\w*slope\w*)", model_text))
+    missing = sorted((referenced | slope_names) - assigned)
+    lines = [".param MC_MM_SWITCH = 0"] + [f".param {name} = 0.0" for name in missing]
     return "\n".join(lines) + "\n" + model_text
 
 
@@ -153,7 +188,18 @@ def run_ngspice(netlist: str, cwd: Path) -> None:
     print(f"[ngspice] start: {cwd / netlist}", flush=True)
     p = subprocess.run(["ngspice", "-b", "-o", "ngspice.log", netlist], cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"ngspice 실패: {p.stderr}\n{p.stdout}")
+        log_path = cwd / "ngspice.log"
+        log_tail = ""
+        if log_path.exists():
+            lines = log_path.read_text(errors="ignore").splitlines()
+            log_tail = "\n".join(lines[-80:])
+        raise RuntimeError(
+            "ngspice 실패\n"
+            f"netlist: {cwd / netlist}\n"
+            f"stderr: {p.stderr}\n"
+            f"stdout: {p.stdout}\n"
+            f"ngspice.log(tail):\n{log_tail}"
+        )
     print(f"[ngspice] done : {cwd / netlist}", flush=True)
 
 
@@ -196,9 +242,10 @@ def calc_ss(vg: np.ndarray, id_abs: np.ndarray, id_target: float) -> float:
     vg_w = vg[mask]
     logid_w = np.log10(np.clip(id_abs[mask], 1e-30, None))
     slope, _ = np.polyfit(vg_w, logid_w, 1)
-    if slope <= 0:
+    slope_abs = abs(float(slope))
+    if slope_abs == 0:
         raise ValueError("SS 추출 slope가 비정상입니다.")
-    return float(1.0 / slope)
+    return float(1.0 / slope_abs)
 
 
 def deriv(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -527,8 +574,8 @@ def simulate_circuit_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -
 .option temp={cfg.temp}
 VDD vdd 0 {cfg.vdd}
 VIN in 0 PULSE(0 {cfg.vdd} 0 20p 20p 200p 400p)
-MP out in vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}
-MN out in 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}
+XP out in vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}
+XN out in 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}
 CLOAD out 0 5f
 .tran 1p 2n
 .measure tran INV_tpHL trig v(in) val={0.5*cfg.vdd} rise=1 targ v(out) val={0.5*cfg.vdd} fall=1
@@ -550,16 +597,16 @@ CLOAD out 0 5f
     ro_nodes = [f"n{i}" for i in range(11)]
     inv_chain = []
     for i in range(11):
-        inv_chain.append(f"MP{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
-        inv_chain.append(f"MN{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
+        inv_chain.append(f"XP{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
+        inv_chain.append(f"XN{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
     ro_deck = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
 VDD vdd 0 {cfg.vdd}
 {chr(10).join(inv_chain)}
-.ic v(n0)=0
+.ic v(n0)=0 v(n1)={cfg.vdd}
 .control
-tran 1p 8n
+tran 1p 20n
 wrdata ro_wave.dat time v(n0)
 quit
 .endc
@@ -567,12 +614,10 @@ quit
 """
     (workdir / "ro.sp").write_text(ro_deck)
     run_ngspice("ro.sp", workdir)
-    arr = np.loadtxt(workdir / "ro_wave.dat")
-    if arr.ndim == 1:
-        arr = arr.reshape(1, -1)
-    t = arr[:, 0]
-    v = arr[:, 1]
-    mask = (t >= 2e-9) & (t <= 8e-9)
+    ro_df = load_wrdata(workdir / "ro_wave.dat")
+    t = ro_df["x_vec1"].to_numpy()
+    v = ro_df["y_vec1"].to_numpy()
+    mask = (t >= 5e-9) & (t <= 20e-9)
     tw = t[mask]
     vw = v[mask]
     thr = 0.5 * cfg.vdd
@@ -612,30 +657,35 @@ Vdn dn 0 {cfg.vdd}
 Vgn gn 0 0
 Vsn sn 0 0
 Vbn bn 0 0
-MN dn gn sn bn sky130_fd_pr__nfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+XN dn gn sn bn sky130_fd_pr__nfet_01v8 l={cfg.l_long} w={cfg.w_wide}
 * PMOS gate off leakage
 Vdp dp 0 0
 Vgp gp 0 {cfg.vdd}
 Vsp sp 0 {cfg.vdd}
 Vbp bp 0 {cfg.vdd}
-MP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.l_long} w={cfg.w_wide}
-.op
-.measure op Ig_off_n param='abs(i(Vgn))'
-.measure op Ig_off_p param='abs(i(Vgp))'
+XP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+.control
+set wr_singlescale
+op
+wrdata ig_off.dat i(Vgn) i(Vgp)
+quit
+.endc
 .end
 """
     (workdir / "ig_off.sp").write_text(deck)
     run_ngspice("ig_off.sp", workdir)
-    log = (workdir / "ngspice.log").read_text(errors="ignore")
+    df = load_wrdata(workdir / "ig_off.dat")
+    ig_n = float(np.abs(df["y_vec0"].to_numpy()[-1]))
+    ig_p = float(np.abs(df["y_vec1"].to_numpy()[-1]))
     return {
-        "Ig_off_n": _parse_meas(log, "Ig_off_n"),
-        "Ig_off_p": _parse_meas(log, "Ig_off_p"),
+        "Ig_off_n": ig_n,
+        "Ig_off_p": ig_p,
     }
 
 
 def simulate_sram_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
     # SRAM 6T (AX/PD/PU): AX=2.7e-7, PD=4.5e-7, PU=2.1e-7, L=1.5e-7
-    ax_w, pd_w, pu_w, lmin = 2.7e-7, 4.5e-7, 2.1e-7, 1.5e-7
+    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
 
     hold_tran = f"""
 .include '{model_path.resolve().as_posix()}'
@@ -644,12 +694,12 @@ VDD vdd 0 {cfg.vdd}
 VWL wl 0 0
 VBL bl 0 {cfg.vdd}
 VBLB blb 0 {cfg.vdd}
-MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-MP2 qb q vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
-MN2 qb q 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
-MAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
-MAX2 qb wl blb 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XP2 qb q vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XN2 qb q 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XAX2 qb wl blb 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
 .ic v(q)={cfg.vdd} v(qb)=0
 .tran 1p 2n
 .measure tran IAVG avg i(VDD) from=0.5n to=2n
@@ -668,9 +718,9 @@ VWL wl 0 0
 VBL bl 0 {cfg.vdd}
 VBLB blb 0 {cfg.vdd}
 VFORCE qb 0 0
-MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
-MAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
 .control
 set wr_singlescale
 dc VFORCE 0 {cfg.vdd} 0.01
@@ -694,9 +744,9 @@ VWL wl 0 {cfg.vdd}
 VBL bl 0 {cfg.vdd - 0.05}
 VBLB blb 0 {cfg.vdd}
 VFORCE qb 0 0
-MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
-MAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
 .control
 set wr_singlescale
 dc VFORCE 0 {cfg.vdd} 0.01
@@ -720,7 +770,7 @@ quit
 
 
 def simulate_sram_ion_ratios(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
-    ax_w, pd_w, pu_w, lmin = 2.7e-7, 4.5e-7, 2.1e-7, 1.5e-7
+    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
     deck = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
@@ -729,35 +779,39 @@ Vdax dax 0 {cfg.vdd}
 Vgax gax 0 {cfg.vdd}
 Vsax sax 0 0
 Vbax bax 0 0
-MAX dax gax sax bax sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XAX dax gax sax bax sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
 * PD (nMOS)
 Vdpd dpd 0 {cfg.vdd}
 Vgpd gpd 0 {cfg.vdd}
 Vspd spd 0 0
 Vbpd bpd 0 0
-MPD dpd gpd spd bpd sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XPD dpd gpd spd bpd sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
 * PU (pMOS)
 Vdpu dpu 0 0
 Vgpu gpu 0 0
 Vspu spu 0 {cfg.vdd}
 Vbpu bpu 0 {cfg.vdd}
-MPU dpu gpu spu bpu sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-.op
-.measure op IAX param='abs(i(Vdax))'
-.measure op IPD param='abs(i(Vdpd))'
-.measure op IPU param='abs(i(Vdpu))'
-.measure op AX_PD_ratio_Ion param='IAX/IPD'
-.measure op PD_PU_ratio_Ion param='IPD/IPU'
+XPU dpu gpu spu bpu sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+.control
+set wr_singlescale
+op
+wrdata sram_ratio_curr.dat i(Vdax) i(Vdpd) i(Vdpu)
+quit
+.endc
 .end
 """
     (workdir / "sram_ratio.sp").write_text(deck)
     run_ngspice("sram_ratio.sp", workdir)
-    log = (workdir / "ngspice.log").read_text(errors="ignore")
+    arr = np.loadtxt(workdir / "sram_ratio_curr.dat")
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    iax = float(np.abs(arr[-1, 1]))
+    ipd = float(np.abs(arr[-1, 2]))
+    ipu = float(np.abs(arr[-1, 3]))
     return {
-        "AX_PD_ratio_Ion": _parse_meas(log, "AX_PD_ratio_Ion"),
-        "PD_PU_ratio_Ion": _parse_meas(log, "PD_PU_ratio_Ion"),
+        "AX_PD_ratio_Ion": iax / ipd,
+        "PD_PU_ratio_Ion": ipd / ipu,
     }
-
 
 
 def collect_all_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
@@ -844,15 +898,18 @@ def run_sensitivity_for_device(
     cfg: BiasConfig,
     outdir: Path,
     progress: ProgressTracker,
+    max_params: int | None = None,
 ) -> pd.DataFrame:
     rows = []
     raw_rows: List[Dict[str, float | str]] = []
     baseline_rows: List[Dict[str, float | str]] = []
     delta_params = get_delta_params(tt_text, ss_text, ff_text)
+    if max_params is not None:
+        delta_params = delta_params[: max(0, max_params)]
     progress.log(f"{device_name} baseline(TT) simulation start")
     with tempfile.TemporaryDirectory() as td:
         base_model = Path(td) / f"{device_name}_tt.spice"
-        base_model.write_text(tt_text + "\n" + other_tt_text)
+        base_model.write_text(merge_model_texts(tt_text, other_tt_text))
         base_metrics = collect_all_metrics(base_model, cfg, Path(td))
     baseline_rows.append({"device": device_name, "corner": "TT", "alpha": 0.0, **base_metrics})
     progress.advance(f"{device_name} baseline(TT) simulation done")
@@ -891,7 +948,7 @@ def run_sensitivity_for_device(
                     patched = patch_param_alpha(tt_text, corner_text, param, alpha)
                     with tempfile.TemporaryDirectory() as td:
                         mp = Path(td) / f"{device_name}_{param}_{corner_name}_{alpha}.spice"
-                        mp.write_text(patched + "\n" + other_tt_text)
+                        mp.write_text(merge_model_texts(patched, other_tt_text))
                         metric_at_alpha[alpha] = collect_all_metrics(mp, cfg, Path(td))
                 raw_rows.append(
                     {
@@ -944,6 +1001,7 @@ def main() -> None:
     ap.add_argument("--tt-file-p", default="sky130_fd_pr__pfet_01v8__tt.pm3.spice")
     ap.add_argument("--ss-file-p", default="sky130_fd_pr__pfet_01v8__ss.pm3.spice")
     ap.add_argument("--ff-file-p", default="sky130_fd_pr__pfet_01v8__ff.pm3.spice")
+    ap.add_argument("--max-params-per-device", type=int, default=None)
     args = ap.parse_args()
 
     with zipfile.ZipFile(args.spice_zip) as z:
@@ -966,11 +1024,14 @@ def main() -> None:
 
     n_params = get_delta_params(n_tt_text, n_ss_text, n_ff_text)
     p_params = get_delta_params(p_tt_text, p_ss_text, p_ff_text)
+    if args.max_params_per_device is not None:
+        n_params = n_params[: max(0, args.max_params_per_device)]
+        p_params = p_params[: max(0, args.max_params_per_device)]
     total_units = 2 + (len(n_params) * 2 * 5) + (len(p_params) * 2 * 5)
     progress = ProgressTracker(total_units=total_units)
 
-    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress)
-    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress)
+    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
+    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
     make_scope_doc(args.outdir / "scope_32_metrics_150_params.md")
 
     print(n_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
