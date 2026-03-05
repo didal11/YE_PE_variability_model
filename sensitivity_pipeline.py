@@ -32,6 +32,16 @@ class BiasConfig:
     l_short: float = 0.15e-6
     w_wide: float = 2.0e-6
     w_narrow: float = 0.3e-6
+    inv_l: float = 0.15e-6
+    inv_n_w: float = 0.6e-6
+    inv_p_w: float = 0.9e-6
+    gate_l: float = 0.15e-6
+    gate_n_w: float = 0.6e-6
+    gate_p_w: float = 0.9e-6
+    sram_l: float = 0.15e-6
+    sram_ax_w: float = 0.6e-6
+    sram_pd_w: float = 0.9e-6
+    sram_pu_w: float = 0.42e-6
     vbs_for_body: Tuple[float, ...] = (0.0, -0.2, -0.4, -0.6)
     vg_min: float = -0.4
     vg_max: float = 1.8
@@ -115,34 +125,6 @@ def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
     ff_map = build_param_map(ff_text)
     common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
     return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
-
-
-
-def get_all_params(model_text: str) -> List[str]:
-    seen = set()
-    out = []
-    for m in ASSIGN_RE.finditer(model_text):
-        k = m.group(1).lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(k)
-    return out
-
-
-def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
-    common = sorted(set(get_all_params(tt_text)) & set(get_all_params(ss_text)) & set(get_all_params(ff_text)))
-    delta = []
-    for param in common:
-        try:
-            tv = get_param_values(tt_text, param)
-            sv = get_param_values(ss_text, param)
-            fv = get_param_values(ff_text, param)
-        except ValueError:
-            continue
-        if not (tv == sv == fv):
-            delta.append(param)
-    return delta
 
 def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
     try:
@@ -574,8 +556,8 @@ def simulate_circuit_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -
 .option temp={cfg.temp}
 VDD vdd 0 {cfg.vdd}
 VIN in 0 PULSE(0 {cfg.vdd} 0 20p 20p 200p 400p)
-XP out in vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}
-XN out in 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}
+XP out in vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.inv_l} w={cfg.inv_p_w}
+XN out in 0 0 sky130_fd_pr__nfet_01v8 l={cfg.inv_l} w={cfg.inv_n_w}
 CLOAD out 0 5f
 .tran 1p 2n
 .measure tran INV_tpHL trig v(in) val={0.5*cfg.vdd} rise=1 targ v(out) val={0.5*cfg.vdd} fall=1
@@ -597,8 +579,8 @@ CLOAD out 0 5f
     ro_nodes = [f"n{i}" for i in range(11)]
     inv_chain = []
     for i in range(11):
-        inv_chain.append(f"XP{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
-        inv_chain.append(f"XN{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
+        inv_chain.append(f"XP{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.inv_l} w={cfg.inv_p_w}")
+        inv_chain.append(f"XN{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} 0 0 sky130_fd_pr__nfet_01v8 l={cfg.inv_l} w={cfg.inv_n_w}")
     ro_deck = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
@@ -657,13 +639,13 @@ Vdn dn 0 {cfg.vdd}
 Vgn gn 0 0
 Vsn sn 0 0
 Vbn bn 0 0
-XN dn gn sn bn sky130_fd_pr__nfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+XN dn gn sn bn sky130_fd_pr__nfet_01v8 l={cfg.gate_l} w={cfg.gate_n_w}
 * PMOS gate off leakage
 Vdp dp 0 0
 Vgp gp 0 {cfg.vdd}
 Vsp sp 0 {cfg.vdd}
 Vbp bp 0 {cfg.vdd}
-XP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+XP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.gate_l} w={cfg.gate_p_w}
 .control
 set wr_singlescale
 op
@@ -685,7 +667,7 @@ quit
 
 def simulate_sram_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
     # SRAM 6T (AX/PD/PU): AX=2.7e-7, PD=4.5e-7, PU=2.1e-7, L=1.5e-7
-    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
+    ax_w, pd_w, pu_w, lmin = cfg.sram_ax_w, cfg.sram_pd_w, cfg.sram_pu_w, cfg.sram_l
 
     hold_tran = f"""
 .include '{model_path.resolve().as_posix()}'
@@ -770,7 +752,7 @@ quit
 
 
 def simulate_sram_ion_ratios(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
-    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
+    ax_w, pd_w, pu_w, lmin = cfg.sram_ax_w, cfg.sram_pd_w, cfg.sram_pu_w, cfg.sram_l
     deck = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
@@ -986,8 +968,79 @@ def run_sensitivity_for_device(
     (outdir / f"tt_metrics_{device_name}.json").write_text(json.dumps(base_metrics, indent=2))
     pd.DataFrame(raw_rows).to_csv(outdir / f"metrics_raw_{device_name}.csv", index=False)
     pd.DataFrame(baseline_rows).to_csv(outdir / f"metrics_baseline_{device_name}.csv", index=False)
+    export_meaningful_analysis(device_name, outdir, raw_rows, df)
     return df
 
+
+def export_meaningful_analysis(
+    device_name: str,
+    outdir: Path,
+    raw_rows: List[Dict[str, float | str]],
+    sensitivity_df: pd.DataFrame,
+) -> None:
+    raw_df = pd.DataFrame(raw_rows)
+    if raw_df.empty or sensitivity_df.empty:
+        return
+
+    sens_cols = [f"{m}_sens_avg_5pt" for m in METRICS_ORDER if f"{m}_sens_avg_5pt" in sensitivity_df.columns]
+    vec_df = sensitivity_df[["param", *sens_cols]].copy()
+    for col in sens_cols:
+        vals = np.abs(vec_df[col].to_numpy(dtype=float))
+        finite = vals[np.isfinite(vals)]
+        denom = float(np.max(finite)) if finite.size else 0.0
+        vec_df[col] = vec_df[col] / denom if denom > 0 else np.nan
+    vec_df.to_csv(outdir / f"sensitivity_vector_normalized_{device_name}.csv", index=False)
+
+    tier1 = ["RO_freq", "INV_tpHL", "INV_tpLH", "INV_tr", "INV_tf", "STBY_power", "SRAM_hold_SNM", "SRAM_read_margin"]
+    tier2 = ["Ion_n", "Ion_p", "Idlin_n", "Idlin_p", "Ron_n_Vdd", "Ron_p_Vdd", "Ioff_n", "Ioff_p", "ro_n", "ro_p", "GIDL_n", "GIDL_p", "Junc_leak_n", "Junc_leak_p", "Ig_off_n", "Ig_off_p"]
+    map_rows: List[Dict[str, float | str]] = []
+    for param, g in raw_df.groupby("param"):
+        for t1 in tier1:
+            if t1 not in g.columns:
+                continue
+            y = g[t1].to_numpy(dtype=float)
+            if len(y) < 4 or np.nanstd(y) == 0:
+                continue
+            for t2 in tier2:
+                if t2 not in g.columns:
+                    continue
+                x = g[t2].to_numpy(dtype=float)
+                if np.nanstd(x) == 0:
+                    continue
+                corr = float(np.corrcoef(x, y)[0, 1])
+                map_rows.append({"param": param, "impact_metric": t1, "cause_metric": t2, "corr": corr})
+    if map_rows:
+        pd.DataFrame(map_rows).to_csv(outdir / f"cause_impact_map_{device_name}.csv", index=False)
+
+    score_rows: List[Dict[str, float | str]] = []
+    for _, row in sensitivity_df.iterrows():
+        p = row["param"]
+        rg = raw_df[raw_df["param"] == p]
+        for m in METRICS_ORDER:
+            ss_key = f"{m}_sens_SS_5pt"
+            ff_key = f"{m}_sens_FF_5pt"
+            if ss_key not in sensitivity_df.columns or ff_key not in sensitivity_df.columns:
+                continue
+            ss = float(row[ss_key])
+            ff = float(row[ff_key])
+            pair = np.abs(np.array([ss, ff], dtype=float))
+            finite_pair = pair[np.isfinite(pair)]
+            worst_abs = float(np.max(finite_pair)) if finite_pair.size else np.nan
+            asym = float(np.abs(ss - ff))
+
+            nonlin_vals = []
+            for corner in ("SS", "FF"):
+                sub = rg[(rg["corner"] == corner)][["alpha", m]].dropna()
+                if sub.empty:
+                    continue
+                d = {float(a): float(v) for a, v in zip(sub["alpha"], sub[m])}
+                if all(k in d for k in (-1.0, -0.5, 0.0, 0.5, 1.0)):
+                    nonlin_vals.append(abs((d[1.0] + d[-1.0]) / 2.0 - d[0.0]))
+                    nonlin_vals.append(abs((d[0.5] + d[-0.5]) / 2.0 - d[0.0]))
+            nonlin = float(np.nanmean(nonlin_vals)) if nonlin_vals else np.nan
+            score_rows.append({"param": p, "metric": m, "worst_abs_sens": worst_abs, "ss_ff_asym": asym, "nonlinearity_index": nonlin})
+    if score_rows:
+        pd.DataFrame(score_rows).to_csv(outdir / f"corner_integrated_scores_{device_name}.csv", index=False)
 
 
 
@@ -1034,8 +1087,10 @@ def main() -> None:
     p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
     make_scope_doc(args.outdir / "scope_32_metrics_150_params.md")
 
-    print(n_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
-    print(p_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
+    if not n_df.empty and f"{METRICS_ORDER[0]}_sens_avg_5pt" in n_df.columns:
+        print(n_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
+    if not p_df.empty and f"{METRICS_ORDER[0]}_sens_avg_5pt" in p_df.columns:
+        print(p_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
 
 
 if __name__ == "__main__":
