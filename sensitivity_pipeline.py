@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import tempfile
 import zipfile
-from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -856,9 +859,9 @@ def collect_all_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dic
     return m
 
 
-def five_point_central(fm1: float, fm05: float, fp05: float, fp1: float, h: float = 0.5) -> float:
-    """5-point central derivative around alpha=0 with samples at -1, -0.5, 0.5, 1.0."""
-    return (fm1 - 8 * fm05 + 8 * fp05 - fp1) / (12 * h)
+def five_point_forward_at_zero(f0: float, f1: float, f2: float, f3: float, f4: float, h: float = 0.25) -> float:
+    """5-point forward derivative at alpha=0 with points [0, h, 2h, 3h, 4h]."""
+    return (-25 * f0 + 48 * f1 - 36 * f2 + 16 * f3 - 3 * f4) / (12 * h)
 
 
 def make_scope_doc(path: Path) -> None:
@@ -868,8 +871,85 @@ def make_scope_doc(path: Path) -> None:
             f.write(f"- {m}\n")
         f.write("\n## Tier3 Sweep Parameters\n")
         f.write("- device별 TT/SS/FF 코너 비교에서 delta가 존재하는 파라미터만 자동 선택\n")
-        f.write("- alpha levels: -1.0, -0.5, 0.0, 0.5, 1.0\n")
+        f.write("- alpha levels: 0.0, 0.25, 0.5, 0.75, 1.0\n")
 
+
+
+
+def _stable_hash(*parts: str) -> str:
+    h = hashlib.sha256()
+    for part in parts:
+        h.update(part.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
+
+def _load_json(path: Path) -> Dict[str, float] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _save_json(path: Path, payload: Dict[str, float | str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(path)
+
+
+def _alpha_task(
+    device_name: str,
+    param: str,
+    corner_name: str,
+    alpha: float,
+    tt_text: str,
+    corner_text: str,
+    other_tt_text: str,
+    cfg_dict: Dict[str, float | int | tuple],
+    cache_root: str,
+) -> Dict[str, float | str]:
+    cfg = BiasConfig(**cfg_dict)
+    task_dir = Path(cache_root) / device_name / corner_name / param / f"alpha_{alpha:.2f}"
+    result_path = task_dir / "result.json"
+    cached = _load_json(result_path)
+    if cached is not None:
+        return cached
+
+    task_dir.mkdir(parents=True, exist_ok=True)
+    model_path = task_dir / "model.spice"
+    patched = patch_param_alpha(tt_text, corner_text, param, alpha)
+    model_path.write_text(merge_model_texts(patched, other_tt_text))
+    metrics = collect_all_metrics(model_path, cfg, task_dir)
+    row: Dict[str, float | str] = {
+        "device": device_name,
+        "param": param,
+        "corner": corner_name,
+        "alpha": alpha,
+        **metrics,
+    }
+    _save_json(result_path, row)
+    return row
+
+
+def _load_or_run_baseline(
+    device_name: str,
+    tt_text: str,
+    other_tt_text: str,
+    cfg: BiasConfig,
+    outdir: Path,
+) -> Dict[str, float]:
+    cfg_sig = json.dumps(asdict(cfg), sort_keys=True, default=str)
+    key = _stable_hash(device_name, tt_text, other_tt_text, cfg_sig)
+    cache_path = outdir / "baseline_cache" / f"{device_name}_{key}.json"
+    cached = _load_json(cache_path)
+    if cached is not None:
+        return {k: float(v) for k, v in cached.items()}
+
+    with tempfile.TemporaryDirectory() as td:
+        base_model = Path(td) / f"{device_name}_tt.spice"
+        base_model.write_text(merge_model_texts(tt_text, other_tt_text))
+        base_metrics = collect_all_metrics(base_model, cfg, Path(td))
+    _save_json(cache_path, base_metrics)
+    return base_metrics
 
 def run_sensitivity_for_device(
     device_name: str,
@@ -881,6 +961,7 @@ def run_sensitivity_for_device(
     outdir: Path,
     progress: ProgressTracker,
     max_params: int | None = None,
+    workers: int = 3,
 ) -> pd.DataFrame:
     rows = []
     raw_rows: List[Dict[str, float | str]] = []
@@ -889,10 +970,7 @@ def run_sensitivity_for_device(
     if max_params is not None:
         delta_params = delta_params[: max(0, max_params)]
     progress.log(f"{device_name} baseline(TT) simulation start")
-    with tempfile.TemporaryDirectory() as td:
-        base_model = Path(td) / f"{device_name}_tt.spice"
-        base_model.write_text(merge_model_texts(tt_text, other_tt_text))
-        base_metrics = collect_all_metrics(base_model, cfg, Path(td))
+    base_metrics = _load_or_run_baseline(device_name, tt_text, other_tt_text, cfg, outdir)
     baseline_rows.append({"device": device_name, "corner": "TT", "alpha": 0.0, **base_metrics})
     progress.advance(f"{device_name} baseline(TT) simulation done")
 
@@ -917,37 +995,54 @@ def run_sensitivity_for_device(
                 raise ValueError(f"{param} corner 값이 없습니다.")
             dp = float(np.mean(np.array(c_vals[:n]) - np.array(tt_vals[:n])))
 
-            alpha_points = (-1.0, -0.5, 0.0, 0.5, 1.0)
-            metric_at_alpha: Dict[float, Dict[str, float]] = {}
-            for idx_alpha, alpha in enumerate(alpha_points, start=1):
-                print(
-                    f"[progress][{device_name} item {idx_param}/{total_params}] corner={corner_name} alpha {idx_alpha}/{len(alpha_points)}={alpha}",
-                    flush=True,
-                )
-                if alpha == 0.0:
-                    metric_at_alpha[alpha] = dict(base_metrics)
-                else:
-                    patched = patch_param_alpha(tt_text, corner_text, param, alpha)
-                    with tempfile.TemporaryDirectory() as td:
-                        mp = Path(td) / f"{device_name}_{param}_{corner_name}_{alpha}.spice"
-                        mp.write_text(merge_model_texts(patched, other_tt_text))
-                        metric_at_alpha[alpha] = collect_all_metrics(mp, cfg, Path(td))
-                raw_rows.append(
-                    {
-                        "device": device_name,
-                        "param": param,
-                        "corner": corner_name,
-                        "alpha": alpha,
-                        **metric_at_alpha[alpha],
-                    }
-                )
-                progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} done")
+            alpha_points = (0.0, 0.25, 0.5, 0.75, 1.0)
+            metric_at_alpha: Dict[float, Dict[str, float]] = {0.0: dict(base_metrics)}
+            raw_rows.append(
+                {
+                    "device": device_name,
+                    "param": param,
+                    "corner": corner_name,
+                    "alpha": 0.0,
+                    **metric_at_alpha[0.0],
+                }
+            )
+            progress.advance(f"{device_name} param={param} corner={corner_name} alpha=0.0 done")
+
+            task_cache_root = outdir / "task_cache"
+            futures = {}
+            with ProcessPoolExecutor(max_workers=max(1, workers)) as ex:
+                for idx_alpha, alpha in enumerate(alpha_points[1:], start=2):
+                    print(
+                        f"[progress][{device_name} item {idx_param}/{total_params}] corner={corner_name} alpha {idx_alpha}/{len(alpha_points)}={alpha}",
+                        flush=True,
+                    )
+                    fut = ex.submit(
+                        _alpha_task,
+                        device_name,
+                        param,
+                        corner_name,
+                        alpha,
+                        tt_text,
+                        corner_text,
+                        other_tt_text,
+                        asdict(cfg),
+                        str(task_cache_root),
+                    )
+                    futures[fut] = alpha
+
+                for fut in as_completed(futures):
+                    alpha = futures[fut]
+                    row_payload = fut.result()
+                    metric_at_alpha[alpha] = {k: float(v) for k, v in row_payload.items() if k in METRICS_ORDER}
+                    raw_rows.append(row_payload)
+                    progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} done")
 
             for m in METRICS_ORDER:
-                dfdalpha = five_point_central(
-                    metric_at_alpha[-1.0][m],
-                    metric_at_alpha[-0.5][m],
+                dfdalpha = five_point_forward_at_zero(
+                    metric_at_alpha[0.0][m],
+                    metric_at_alpha[0.25][m],
                     metric_at_alpha[0.5][m],
+                    metric_at_alpha[0.75][m],
                     metric_at_alpha[1.0][m],
                 )
                 m0 = base_metrics[m]
@@ -1034,9 +1129,10 @@ def export_meaningful_analysis(
                 if sub.empty:
                     continue
                 d = {float(a): float(v) for a, v in zip(sub["alpha"], sub[m])}
-                if all(k in d for k in (-1.0, -0.5, 0.0, 0.5, 1.0)):
-                    nonlin_vals.append(abs((d[1.0] + d[-1.0]) / 2.0 - d[0.0]))
-                    nonlin_vals.append(abs((d[0.5] + d[-0.5]) / 2.0 - d[0.0]))
+                if all(k in d for k in (0.0, 0.25, 0.5, 0.75, 1.0)):
+                    for a in (0.25, 0.5, 0.75):
+                        linear_interp = (1.0 - a) * d[0.0] + a * d[1.0]
+                        nonlin_vals.append(abs(d[a] - linear_interp))
             nonlin = float(np.nanmean(nonlin_vals)) if nonlin_vals else np.nan
             score_rows.append({"param": p, "metric": m, "worst_abs_sens": worst_abs, "ss_ff_asym": asym, "nonlinearity_index": nonlin})
     if score_rows:
@@ -1055,7 +1151,10 @@ def main() -> None:
     ap.add_argument("--ss-file-p", default="sky130_fd_pr__pfet_01v8__ss.pm3.spice")
     ap.add_argument("--ff-file-p", default="sky130_fd_pr__pfet_01v8__ff.pm3.spice")
     ap.add_argument("--max-params-per-device", type=int, default=None)
+    ap.add_argument("--workers", type=int, default=3)
     args = ap.parse_args()
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
     with zipfile.ZipFile(args.spice_zip) as z:
         n_tt_text = z.read(args.tt_file).decode("utf-8", errors="ignore")
@@ -1083,8 +1182,8 @@ def main() -> None:
     total_units = 2 + (len(n_params) * 2 * 5) + (len(p_params) * 2 * 5)
     progress = ProgressTracker(total_units=total_units)
 
-    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
-    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
+    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers)
+    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers)
     make_scope_doc(args.outdir / "scope_32_metrics_150_params.md")
 
     if not n_df.empty and f"{METRICS_ORDER[0]}_sens_avg_5pt" in n_df.columns:
