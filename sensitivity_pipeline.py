@@ -16,15 +16,11 @@ import numpy as np
 import pandas as pd
 
 METRICS_ORDER = [
-    "Vth_lowVds", "Vth_highVds", "DIBL", "SS_longL", "SS_shortL", "Ioff_ref", "Voff_index", "n_eff", "Body_sens_Vth",
-    "Idlin_Vdd", "Ion_Vdd", "Ion_over_Idlin", "gm_max", "Vg_at_gm_max", "gm_over_Id_weak", "gm_over_Id_mod", "Vdsat_knee",
-    "gds_sat", "ro_sat", "gds_Vds_sens", "CLM_index", "Ron_lin_Vdd", "Ron_lin_Vddm", "Early_like",
-    "Vth_rolloff_L", "SS_rolloff_L", "Ion_rolloff_L_ratio", "Vth_narrowW", "SS_narrowW", "Ron_narrowW_ratio",
-    "GIDL_index", "Junc_leak_index",
-]
-
-PARAMS_150 = [
-    "a0", "ags", "alpha0", "alpha1", "at", "b0", "b1", "beta0", "cdscd", "cgdo", "cgso", "cjs", "cjswgs", "cjsws", "dlc", "drout", "dsub", "dwc", "eta0", "etab", "k1", "k2", "keta", "kt1", "kt2", "la0", "lags", "lalpha0", "lalpha1", "lat", "lb0", "lb1", "lbeta0", "lcdscd", "ldrout", "ldsub", "leta0", "letab", "lint", "lk1", "lk2", "lketa", "lkt1", "lkt2", "lnfactor", "lpclm", "lpdiblc1", "lpdiblc2", "lpdiblcb", "lpscbe1", "lu0", "lua", "lua1", "lub", "lub1", "luc", "luc1", "lute", "lvoff", "lvsat", "lvth0", "nfactor", "pa0", "pags", "palpha0", "palpha1", "pat", "pb0", "pb1", "pbeta0", "pcdscd", "pclm", "pdiblc1", "pdiblc2", "pdiblcb", "pdrout", "pdsub", "peta0", "petab", "pk1", "pk2", "pketa", "pkt1", "pkt2", "pnfactor", "ppclm", "ppdiblc1", "ppdiblc2", "ppdiblcb", "ppscbe1", "pscbe1", "pu0", "pua", "pua1", "pub", "pub1", "puc", "puc1", "pute", "pvoff", "pvsat", "pvth0", "toxe", "u0", "ua", "ua1", "ub", "ub1", "uc", "uc1", "ute", "voff", "vsat", "vth0", "wa0", "wags", "walpha0", "walpha1", "wat", "wb0", "wb1", "wbeta0", "wcdscd", "wdrout", "wdsub", "weta0", "wetab", "wint", "wk1", "wk2", "wketa", "wkt1", "wkt2", "wnfactor", "wpclm", "wpdiblc1", "wpdiblc2", "wpdiblcb", "wpscbe1", "wu0", "wua", "wua1", "wub", "wub1", "wuc", "wuc1", "wute", "wvoff", "wvsat", "wvth0"
+    "RO_freq", "INV_tpHL", "INV_tpLH", "INV_tr", "INV_tf", "STBY_power", "SRAM_hold_SNM", "SRAM_read_margin",
+    "Ion_n", "Ion_p", "Idlin_n", "Idlin_p", "Ron_n_Vdd", "Ron_n_Vddm", "Ron_p_Vdd", "Ron_p_Vddm",
+    "Ioff_n", "Ioff_p", "ro_n", "ro_p", "CLM_index_n", "CLM_index_p", "GIDL_n", "GIDL_p",
+    "Junc_leak_n", "Junc_leak_p", "Ig_off_n", "Ig_off_p",
+    "Ion_rolloff_L_ratio_n", "Ron_narrowW_ratio_n", "Ion_short_narrow_ratio_n", "AX_PD_ratio_Ion", "PD_PU_ratio_Ion",
 ]
 
 @dataclass
@@ -47,8 +43,51 @@ class BiasConfig:
     gidl_vg_stop: float = 0.0
     gidl_vg_step: float = 0.02
 
+
+@dataclass
+class ProgressTracker:
+    total_units: int
+    completed_units: int = 0
+
+    def pct(self) -> float:
+        if self.total_units <= 0:
+            return 100.0
+        return 100.0 * self.completed_units / self.total_units
+
+    def log(self, msg: str) -> None:
+        print(f"[progress][overall {self.completed_units}/{self.total_units} {self.pct():5.1f}%] {msg}", flush=True)
+
+    def advance(self, msg: str) -> None:
+        self.completed_units += 1
+        self.log(msg)
+
 FLOAT_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 ASSIGN_RE = re.compile(r"(\b[a-zA-Z_]\w*\b)\s*=\s*([^\s]+)")
+
+
+def strip_dot_end_cards(model_text: str) -> str:
+    lines = []
+    for line in model_text.splitlines():
+        if line.strip().lower() == ".end":
+            continue
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def merge_model_texts(primary_text: str, secondary_text: str) -> str:
+    return strip_dot_end_cards(primary_text) + "\n" + strip_dot_end_cards(secondary_text)
+
+
+def build_param_map(model_text: str) -> Dict[str, List[float]]:
+    values: Dict[str, List[float]] = {}
+    for m in ASSIGN_RE.finditer(model_text):
+        key = m.group(1).lower()
+        try:
+            num = parse_num(m.group(2))
+        except ValueError:
+            continue
+        values.setdefault(key, []).append(num)
+    return values
 
 
 def parse_num(token: str) -> float:
@@ -59,16 +98,23 @@ def parse_num(token: str) -> float:
 
 
 def get_param_values(model_text: str, param: str) -> List[float]:
-    vals = []
-    for m in ASSIGN_RE.finditer(model_text):
-        if m.group(1).lower() == param.lower():
-            vals.append(parse_num(m.group(2)))
+    val_map = build_param_map(model_text)
+    vals = val_map.get(param.lower(), [])
     if not vals:
         raise ValueError(f"파라미터 '{param}'를 찾지 못했습니다.")
     return vals
 
 
+def get_all_params(model_text: str) -> List[str]:
+    return list(build_param_map(model_text).keys())
 
+
+def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
+    tt_map = build_param_map(tt_text)
+    ss_map = build_param_map(ss_text)
+    ff_map = build_param_map(ff_text)
+    common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
+    return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
 
 def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
     try:
@@ -102,8 +148,11 @@ def patch_param_alpha(tt_text: str, corner_text: str, param: str, alpha: float) 
 
 
 def inject_missing_monte_params(model_text: str) -> str:
-    slope_names = sorted(set(re.findall(r"(sky130_fd_pr__nfet_01v8__\w*slope\w*)", model_text)))
-    lines = [".param MC_MM_SWITCH = 0"] + [f".param {name} = 0.0" for name in slope_names]
+    assigned = {m.group(1) for m in ASSIGN_RE.finditer(model_text)}
+    referenced = set(re.findall(r"(sky130_fd_pr__\w+__\w+)", model_text))
+    slope_names = set(re.findall(r"(sky130_fd_pr__\w+__\w*slope\w*)", model_text))
+    missing = sorted((referenced | slope_names) - assigned)
+    lines = [".param MC_MM_SWITCH = 0"] + [f".param {name} = 0.0" for name in missing]
     return "\n".join(lines) + "\n" + model_text
 
 
@@ -111,7 +160,18 @@ def run_ngspice(netlist: str, cwd: Path) -> None:
     print(f"[ngspice] start: {cwd / netlist}", flush=True)
     p = subprocess.run(["ngspice", "-b", "-o", "ngspice.log", netlist], cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
-        raise RuntimeError(f"ngspice 실패: {p.stderr}\n{p.stdout}")
+        log_path = cwd / "ngspice.log"
+        log_tail = ""
+        if log_path.exists():
+            lines = log_path.read_text(errors="ignore").splitlines()
+            log_tail = "\n".join(lines[-80:])
+        raise RuntimeError(
+            "ngspice 실패\n"
+            f"netlist: {cwd / netlist}\n"
+            f"stderr: {p.stderr}\n"
+            f"stdout: {p.stdout}\n"
+            f"ngspice.log(tail):\n{log_tail}"
+        )
     print(f"[ngspice] done : {cwd / netlist}", flush=True)
 
 
@@ -154,9 +214,10 @@ def calc_ss(vg: np.ndarray, id_abs: np.ndarray, id_target: float) -> float:
     vg_w = vg[mask]
     logid_w = np.log10(np.clip(id_abs[mask], 1e-30, None))
     slope, _ = np.polyfit(vg_w, logid_w, 1)
-    if slope <= 0:
+    slope_abs = abs(float(slope))
+    if slope_abs == 0:
         raise ValueError("SS 추출 slope가 비정상입니다.")
-    return float(1.0 / slope)
+    return float(1.0 / slope_abs)
 
 
 def deriv(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -238,6 +299,10 @@ altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_long}
 altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_narrow}
 dc Vd 0 {cfg.vdd} {cfg.vd_step}
 wrdata idvd_narrow_vdd.dat v(d) i(Vd)
+altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_short}
+altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_narrow}
+dc Vd 0 {cfg.vdd} {cfg.vd_step}
+wrdata idvd_short_narrow_vdd.dat v(d) i(Vd)
 altermod @x1[sky130_fd_pr__nfet_01v8] l={cfg.l_long}
 altermod @x1[sky130_fd_pr__nfet_01v8] w={cfg.w_wide}
 alter Vg {cfg.vdd - cfg.delta_vg}
@@ -273,6 +338,7 @@ quit
     vd, idvd = read_xy("idvd_vdd.dat")
     vd_s, idvd_s = read_xy("idvd_short_vdd.dat")
     vd_nw, idvd_nw = read_xy("idvd_narrow_vdd.dat")
+    vd_sn, idvd_sn = read_xy("idvd_short_narrow_vdd.dat")
     vd_m, idvd_m = read_xy("idvd_vddm_lin.dat")
     vd_j, id_j = read_xy("junc.dat")
 
@@ -325,36 +391,505 @@ quit
         "Vth_narrowW": interp_x_for_y(vg_n, id_n, cfg.icrit * (cfg.w_narrow / cfg.l_long)) - vth_high,
         "SS_narrowW": calc_ss(vg_n_low, np.abs(id_n_low), cfg.icrit * (cfg.w_narrow / cfg.l_long)) - ss_long,
         "Ron_narrowW_ratio": (cfg.vds_low / float(np.interp(cfg.vds_low, vd_nw, idvd_nw))) / (cfg.vds_low / idlin),
+        "Ion_short_narrow_ratio": float(np.interp(cfg.vdd, vd_sn, idvd_sn)) / ion,
         "GIDL_index": float(np.interp(cfg.gidl_vg_start, vg_gidl, gidl_i)),
         "Junc_leak_index": float(np.interp(0.5, vd_j, id_j)),
     }
 
 
-def five_point_forward(f0: float, f1: float, f2: float, f3: float, f4: float, h: float) -> float:
-    return (-25 * f0 + 48 * f1 - 36 * f2 + 16 * f3 - 3 * f4) / (12 * h)
+
+
+def simulate_metrics_pfet(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    body_sweeps = []
+    for i, vb in enumerate((cfg.vdd, cfg.vdd - 0.2, cfg.vdd - 0.4, cfg.vdd - 0.6)):
+        body_sweeps += [f"alter Vb {vb}", f"dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}", f"wrdata idvg_body_{i}.dat v(g) i(Vd)"]
+    deck = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+.param Llong={cfg.l_long} Lshort={cfg.l_short} Wwide={cfg.w_wide} Wnarrow={cfg.w_narrow}
+Vd d 0 0
+Vg g 0 0
+Vs s 0 {cfg.vdd}
+Vb b 0 {cfg.vdd}
+X1 d g s b sky130_fd_pr__pfet_01v8 l={{Llong}} w={{Wwide}}
+.control
+set wr_singlescale
+alter Vd {cfg.vdd - cfg.vds_low}
+alter Vg 0
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_low.dat v(g) i(Vd)
+alter Vd 0
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_high.dat v(g) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] l={cfg.l_short}
+alter Vd 0
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_short_high.dat v(g) i(Vd)
+alter Vd {cfg.vdd - cfg.vds_low}
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_short_low.dat v(g) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] l={cfg.l_long}
+altermod @x1[sky130_fd_pr__pfet_01v8] w={cfg.w_narrow}
+alter Vd 0
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_narrow_high.dat v(g) i(Vd)
+alter Vd {cfg.vdd - cfg.vds_low}
+dc Vg {cfg.vg_min} {cfg.vg_max} {cfg.vg_step}
+wrdata idvg_narrow_low.dat v(g) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] w={cfg.w_wide}
+alter Vg 0
+dc Vd {cfg.vdd} 0 {-cfg.vd_step}
+wrdata idvd_vdd.dat v(d) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] l={cfg.l_short}
+altermod @x1[sky130_fd_pr__pfet_01v8] w={cfg.w_wide}
+dc Vd {cfg.vdd} 0 {-cfg.vd_step}
+wrdata idvd_short_vdd.dat v(d) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] l={cfg.l_long}
+altermod @x1[sky130_fd_pr__pfet_01v8] w={cfg.w_narrow}
+dc Vd {cfg.vdd} 0 {-cfg.vd_step}
+wrdata idvd_narrow_vdd.dat v(d) i(Vd)
+altermod @x1[sky130_fd_pr__pfet_01v8] l={cfg.l_long}
+altermod @x1[sky130_fd_pr__pfet_01v8] w={cfg.w_wide}
+alter Vg {cfg.delta_vg}
+dc Vd {cfg.vdd} {cfg.vdd-cfg.vds_low} {-cfg.vd_step}
+wrdata idvd_vddm_lin.dat v(d) i(Vd)
+alter Vd 0
+{chr(10).join(body_sweeps)}
+alter Vb {cfg.vdd}
+dc Vg {cfg.vdd} {cfg.vdd+0.4} {cfg.gidl_vg_step}
+wrdata gidl_vg.dat v(g) i(Vd)
+alter Vg {cfg.vdd}
+alter Vs {cfg.vdd}
+alter Vb {cfg.vdd}
+dc Vd {cfg.vdd} {cfg.vdd-0.5} -0.05
+wrdata junc.dat v(d) i(Vd)
+quit
+.endc
+.end
+"""
+    (workdir / "sim.sp").write_text(deck)
+    run_ngspice("sim.sp", workdir)
+
+    def read_xy(fname: str):
+        df = load_wrdata(workdir / fname)
+        return df["x_vec0"].to_numpy(), np.abs(df["y_vec1"].to_numpy())
+
+    vg_l, id_l = read_xy("idvg_low.dat")
+    vg_h, id_h = read_xy("idvg_high.dat")
+    vg_sh, id_sh = read_xy("idvg_short_high.dat")
+    vg_sh_low, id_sh_low = read_xy("idvg_short_low.dat")
+    vg_n, id_n = read_xy("idvg_narrow_high.dat")
+    vg_n_low, id_n_low = read_xy("idvg_narrow_low.dat")
+    vd, idvd = read_xy("idvd_vdd.dat")
+    vd_s, idvd_s = read_xy("idvd_short_vdd.dat")
+    vd_nw, idvd_nw = read_xy("idvd_narrow_vdd.dat")
+    vd_m, idvd_m = read_xy("idvd_vddm_lin.dat")
+    vd_j, id_j = read_xy("junc.dat")
+
+    icrit_long = cfg.icrit * (cfg.w_wide / cfg.l_long)
+    icrit_short = cfg.icrit * (cfg.w_wide / cfg.l_short)
+    vth_low = interp_x_for_y(vg_l, id_l, icrit_long)
+    vth_high = interp_x_for_y(vg_h, id_h, icrit_long)
+    ss_long = calc_ss(vg_l, np.abs(id_l), icrit_long)
+    ss_short = calc_ss(vg_sh_low, np.abs(id_sh_low), icrit_short)
+    ioff = float(np.interp(cfg.vdd, vg_h, id_h))
+    voff_index = float(np.log10(max(abs(ioff), 1e-30)))
+    n_eff = ss_long / (math.log(10) * 0.02585)
+
+    vths = [interp_x_for_y(read_xy(f"idvg_body_{i}.dat")[0], read_xy(f"idvg_body_{i}.dat")[1], icrit_long) for i,_ in enumerate((0,1,2,3))]
+    body_sens = np.polyfit(np.array((cfg.vdd, cfg.vdd - 0.2, cfg.vdd - 0.4, cfg.vdd - 0.6)), np.array(vths), 1)[0]
+
+    idlin = float(np.interp(cfg.vdd - cfg.vds_low, vd, idvd)); ion = float(np.interp(0.0, vd, idvd))
+    gm = deriv(vg_h, id_h); gm_id = gm / np.clip(id_h, 1e-30, None)
+    gds = deriv(vd, idvd); gds_sat = float(np.interp(0.0, vd, np.abs(gds)))
+
+    vg_gidl, gidl_i = read_xy("gidl_vg.dat")
+    return {
+        "Vth_lowVds": vth_low,
+        "Vth_highVds": vth_high,
+        "DIBL": (vth_low - vth_high) / (cfg.vdd - cfg.vds_low),
+        "SS_longL": ss_long,
+        "SS_shortL": ss_short,
+        "Ioff_ref": ioff,
+        "Voff_index": voff_index,
+        "n_eff": n_eff,
+        "Body_sens_Vth": float(body_sens),
+        "Idlin_Vdd": idlin,
+        "Ion_Vdd": ion,
+        "Ion_over_Idlin": ion / idlin,
+        "gm_max": float(np.max(gm)),
+        "Vg_at_gm_max": float(vg_h[np.argmax(gm)]),
+        "gm_over_Id_weak": interp_y_for_x_sorted(id_h, gm_id, icrit_long),
+        "gm_over_Id_mod": interp_y_for_x_sorted(id_h, gm_id, 10 * icrit_long),
+        "Vdsat_knee": extract_vdsat_knee(vd[::-1], idvd[::-1]),
+        "gds_sat": gds_sat,
+        "ro_sat": 1.0 / gds_sat,
+        "gds_Vds_sens": (float(np.interp(0.0, vd, np.abs(gds))) - float(np.interp(0.2 * cfg.vdd, vd, np.abs(gds)))) / (0.2 * cfg.vdd),
+        "CLM_index": (ion - float(np.interp(0.2 * cfg.vdd, vd, idvd))) / ion,
+        "Ron_lin_Vdd": cfg.vds_low / idlin,
+        "Ron_lin_Vddm": cfg.vds_low / float(np.interp(cfg.vdd - cfg.vds_low, vd_m, idvd_m)),
+        "Early_like": (1.0 / gds_sat) * ion,
+        "Vth_rolloff_L": interp_x_for_y(vg_sh, id_sh, icrit_short) - vth_high,
+        "SS_rolloff_L": ss_short - ss_long,
+        "Ion_rolloff_L_ratio": float(np.interp(0.0, vd_s, idvd_s)) / ion,
+        "Vth_narrowW": interp_x_for_y(vg_n, id_n, cfg.icrit * (cfg.w_narrow / cfg.l_long)) - vth_high,
+        "SS_narrowW": calc_ss(vg_n_low, np.abs(id_n_low), cfg.icrit * (cfg.w_narrow / cfg.l_long)) - ss_long,
+        "Ron_narrowW_ratio": (cfg.vds_low / float(np.interp(cfg.vdd - cfg.vds_low, vd_nw, idvd_nw))) / (cfg.vds_low / idlin),
+        "GIDL_index": float(np.interp(cfg.vdd + 0.4, vg_gidl, gidl_i)),
+        "Junc_leak_index": float(np.interp(cfg.vdd - 0.5, vd_j, id_j)),
+    }
+
+
+def simulate_circuit_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    inv_deck = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+VIN in 0 PULSE(0 {cfg.vdd} 0 20p 20p 200p 400p)
+XP out in vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}
+XN out in 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}
+CLOAD out 0 5f
+.tran 1p 2n
+.measure tran INV_tpHL trig v(in) val={0.5*cfg.vdd} rise=1 targ v(out) val={0.5*cfg.vdd} fall=1
+.measure tran INV_tpLH trig v(in) val={0.5*cfg.vdd} fall=1 targ v(out) val={0.5*cfg.vdd} rise=1
+.measure tran INV_tr trig v(out) val={0.1*cfg.vdd} rise=1 targ v(out) val={0.9*cfg.vdd} rise=1
+.measure tran INV_tf trig v(out) val={0.9*cfg.vdd} fall=1 targ v(out) val={0.1*cfg.vdd} fall=1
+.end
+"""
+    (workdir / "inv.sp").write_text(inv_deck)
+    run_ngspice("inv.sp", workdir)
+    inv_log = (workdir / "ngspice.log").read_text(errors="ignore")
+
+    def meas(log: str, key: str) -> float:
+        m = re.search(rf"{re.escape(key)}\s*=\s*([-+0-9.eE]+)", log, re.IGNORECASE)
+        if not m:
+            raise ValueError(f"measure {key} not found")
+        return float(m.group(1))
+
+    ro_nodes = [f"n{i}" for i in range(11)]
+    inv_chain = []
+    for i in range(11):
+        inv_chain.append(f"XP{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} vdd vdd sky130_fd_pr__pfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
+        inv_chain.append(f"XN{i} {ro_nodes[(i+1)%11]} {ro_nodes[i]} 0 0 sky130_fd_pr__nfet_01v8 l={cfg.l_short} w={cfg.w_wide}")
+    ro_deck = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+{chr(10).join(inv_chain)}
+.ic v(n0)=0 v(n1)={cfg.vdd}
+.control
+tran 1p 20n
+wrdata ro_wave.dat time v(n0)
+quit
+.endc
+.end
+"""
+    (workdir / "ro.sp").write_text(ro_deck)
+    run_ngspice("ro.sp", workdir)
+    ro_df = load_wrdata(workdir / "ro_wave.dat")
+    t = ro_df["x_vec1"].to_numpy()
+    v = ro_df["y_vec1"].to_numpy()
+    mask = (t >= 5e-9) & (t <= 20e-9)
+    tw = t[mask]
+    vw = v[mask]
+    thr = 0.5 * cfg.vdd
+    idx = np.where((vw[:-1] < thr) & (vw[1:] >= thr))[0]
+    if len(idx) < 11:
+        raise ValueError("RO edge count 부족")
+    crossings = []
+    for i in idx[:11]:
+        t0, t1 = tw[i], tw[i + 1]
+        v0, v1 = vw[i], vw[i + 1]
+        crossings.append(t0 + (thr - v0) * (t1 - t0) / (v1 - v0))
+    periods = np.diff(np.array(crossings[:11]))
+    ro_freq = float(1.0 / np.mean(periods[:10]))
+
+    return {
+        "RO_freq": ro_freq,
+        "INV_tpHL": meas(inv_log, "INV_tpHL"),
+        "INV_tpLH": meas(inv_log, "INV_tpLH"),
+        "INV_tr": meas(inv_log, "INV_tr"),
+        "INV_tf": meas(inv_log, "INV_tf"),
+    }
+
+
+def _parse_meas(log_text: str, key: str) -> float:
+    m = re.search(rf"{re.escape(key)}\s*=\s*([-+0-9.eE]+)", log_text, re.IGNORECASE)
+    if not m:
+        raise ValueError(f"measure {key} not found")
+    return float(m.group(1))
+
+
+def simulate_gate_off_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    deck = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+* NMOS gate off leakage
+Vdn dn 0 {cfg.vdd}
+Vgn gn 0 0
+Vsn sn 0 0
+Vbn bn 0 0
+XN dn gn sn bn sky130_fd_pr__nfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+* PMOS gate off leakage
+Vdp dp 0 0
+Vgp gp 0 {cfg.vdd}
+Vsp sp 0 {cfg.vdd}
+Vbp bp 0 {cfg.vdd}
+XP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.l_long} w={cfg.w_wide}
+.control
+set wr_singlescale
+op
+wrdata ig_off.dat i(Vgn) i(Vgp)
+quit
+.endc
+.end
+"""
+    (workdir / "ig_off.sp").write_text(deck)
+    run_ngspice("ig_off.sp", workdir)
+    df = load_wrdata(workdir / "ig_off.dat")
+    ig_n = float(np.abs(df["y_vec0"].to_numpy()[-1]))
+    ig_p = float(np.abs(df["y_vec1"].to_numpy()[-1]))
+    return {
+        "Ig_off_n": ig_n,
+        "Ig_off_p": ig_p,
+    }
+
+
+def simulate_sram_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    # SRAM 6T (AX/PD/PU): AX=2.7e-7, PD=4.5e-7, PU=2.1e-7, L=1.5e-7
+    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
+
+    hold_tran = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+VWL wl 0 0
+VBL bl 0 {cfg.vdd}
+VBLB blb 0 {cfg.vdd}
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XP2 qb q vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XN2 qb q 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+XAX2 qb wl blb 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+.ic v(q)={cfg.vdd} v(qb)=0
+.tran 1p 2n
+.measure tran IAVG avg i(VDD) from=0.5n to=2n
+.measure tran STBY_power param='{cfg.vdd}*abs(IAVG)'
+.end
+"""
+    (workdir / "sram_hold_tran.sp").write_text(hold_tran)
+    run_ngspice("sram_hold_tran.sp", workdir)
+    hold_log = (workdir / "ngspice.log").read_text(errors="ignore")
+
+    hold_dc = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+VWL wl 0 0
+VBL bl 0 {cfg.vdd}
+VBLB blb 0 {cfg.vdd}
+VFORCE qb 0 0
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+.control
+set wr_singlescale
+dc VFORCE 0 {cfg.vdd} 0.01
+wrdata sram_hold_vtc.dat v(qb) v(q)
+quit
+.endc
+.end
+"""
+    (workdir / "sram_hold_dc.sp").write_text(hold_dc)
+    run_ngspice("sram_hold_dc.sp", workdir)
+    hdf = load_wrdata(workdir / "sram_hold_vtc.dat")
+    hqb = hdf["x_vec0"].to_numpy()
+    hq = hdf["y_vec1"].to_numpy()
+    hold_snm = float(np.min(np.abs(hq - hqb)) / 2.0)
+
+    read_dc = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+VWL wl 0 {cfg.vdd}
+VBL bl 0 {cfg.vdd - 0.05}
+VBLB blb 0 {cfg.vdd}
+VFORCE qb 0 0
+XP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+XN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+XAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+.control
+set wr_singlescale
+dc VFORCE 0 {cfg.vdd} 0.01
+wrdata sram_read_vtc.dat v(qb) v(q)
+quit
+.endc
+.end
+"""
+    (workdir / "sram_read_dc.sp").write_text(read_dc)
+    run_ngspice("sram_read_dc.sp", workdir)
+    rdf = load_wrdata(workdir / "sram_read_vtc.dat")
+    rqb = rdf["x_vec0"].to_numpy()
+    rq = rdf["y_vec1"].to_numpy()
+    read_snm = float(np.min(np.abs(rq - rqb)) / 2.0)
+
+    return {
+        "STBY_power": _parse_meas(hold_log, "STBY_power"),
+        "SRAM_hold_SNM": hold_snm,
+        "SRAM_read_margin": read_snm,
+    }
+
+
+def simulate_sram_ion_ratios(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    ax_w, pd_w, pu_w, lmin = cfg.w_wide, cfg.w_wide, cfg.w_wide, cfg.l_short
+    deck = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+* AX (nMOS)
+Vdax dax 0 {cfg.vdd}
+Vgax gax 0 {cfg.vdd}
+Vsax sax 0 0
+Vbax bax 0 0
+XAX dax gax sax bax sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+* PD (nMOS)
+Vdpd dpd 0 {cfg.vdd}
+Vgpd gpd 0 {cfg.vdd}
+Vspd spd 0 0
+Vbpd bpd 0 0
+XPD dpd gpd spd bpd sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+* PU (pMOS)
+Vdpu dpu 0 0
+Vgpu gpu 0 0
+Vspu spu 0 {cfg.vdd}
+Vbpu bpu 0 {cfg.vdd}
+XPU dpu gpu spu bpu sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+.control
+set wr_singlescale
+op
+wrdata sram_ratio_curr.dat i(Vdax) i(Vdpd) i(Vdpu)
+quit
+.endc
+.end
+"""
+    (workdir / "sram_ratio.sp").write_text(deck)
+    run_ngspice("sram_ratio.sp", workdir)
+    arr = np.loadtxt(workdir / "sram_ratio_curr.dat")
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    iax = float(np.abs(arr[-1, 1]))
+    ipd = float(np.abs(arr[-1, 2]))
+    ipu = float(np.abs(arr[-1, 3]))
+    return {
+        "AX_PD_ratio_Ion": iax / ipd,
+        "PD_PU_ratio_Ion": ipd / ipu,
+    }
+
+
+def collect_all_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
+    n_dir = workdir / "n"
+    p_dir = workdir / "p"
+    c_dir = workdir / "c"
+    g_dir = workdir / "g"
+    s_dir = workdir / "s"
+    sr_dir = workdir / "sr"
+    n_dir.mkdir(parents=True, exist_ok=True)
+    p_dir.mkdir(parents=True, exist_ok=True)
+    c_dir.mkdir(parents=True, exist_ok=True)
+    g_dir.mkdir(parents=True, exist_ok=True)
+    s_dir.mkdir(parents=True, exist_ok=True)
+    sr_dir.mkdir(parents=True, exist_ok=True)
+
+    n = simulate_metrics(model_path, cfg, n_dir)
+    p = simulate_metrics_pfet(model_path, cfg, p_dir)
+    c = simulate_circuit_metrics(model_path, cfg, c_dir)
+    g = simulate_gate_off_metrics(model_path, cfg, g_dir)
+    s = simulate_sram_metrics(model_path, cfg, s_dir)
+    sr = simulate_sram_ion_ratios(model_path, cfg, sr_dir)
+
+    m = {k: np.nan for k in METRICS_ORDER}
+    m.update({
+        "RO_freq": c.get("RO_freq", np.nan),
+        "INV_tpHL": c.get("INV_tpHL", np.nan),
+        "INV_tpLH": c.get("INV_tpLH", np.nan),
+        "INV_tr": c.get("INV_tr", np.nan),
+        "INV_tf": c.get("INV_tf", np.nan),
+        "Ion_n": n.get("Ion_Vdd", np.nan),
+        "Ion_p": p.get("Ion_Vdd", np.nan),
+        "Idlin_n": n.get("Idlin_Vdd", np.nan),
+        "Idlin_p": p.get("Idlin_Vdd", np.nan),
+        "Ron_n_Vdd": n.get("Ron_lin_Vdd", np.nan),
+        "Ron_n_Vddm": n.get("Ron_lin_Vddm", np.nan),
+        "Ron_p_Vdd": p.get("Ron_lin_Vdd", np.nan),
+        "Ron_p_Vddm": p.get("Ron_lin_Vddm", np.nan),
+        "Ioff_n": n.get("Ioff_ref", np.nan),
+        "Ioff_p": p.get("Ioff_ref", np.nan),
+        "ro_n": n.get("ro_sat", np.nan),
+        "ro_p": p.get("ro_sat", np.nan),
+        "CLM_index_n": n.get("CLM_index", np.nan),
+        "CLM_index_p": p.get("CLM_index", np.nan),
+        "GIDL_n": n.get("GIDL_index", np.nan),
+        "GIDL_p": p.get("GIDL_index", np.nan),
+        "Junc_leak_n": n.get("Junc_leak_index", np.nan),
+        "Junc_leak_p": p.get("Junc_leak_index", np.nan),
+        "Ig_off_n": g.get("Ig_off_n", np.nan),
+        "Ig_off_p": g.get("Ig_off_p", np.nan),
+        "Ion_rolloff_L_ratio_n": n.get("Ion_rolloff_L_ratio", np.nan),
+        "Ron_narrowW_ratio_n": n.get("Ron_narrowW_ratio", np.nan),
+        "Ion_short_narrow_ratio_n": n.get("Ion_short_narrow_ratio", np.nan),
+        "STBY_power": s.get("STBY_power", np.nan),
+        "SRAM_hold_SNM": s.get("SRAM_hold_SNM", np.nan),
+        "SRAM_read_margin": s.get("SRAM_read_margin", np.nan),
+        "AX_PD_ratio_Ion": sr.get("AX_PD_ratio_Ion", np.nan),
+        "PD_PU_ratio_Ion": sr.get("PD_PU_ratio_Ion", np.nan),
+    })
+    return m
+
+
+def five_point_central(fm1: float, fm05: float, fp05: float, fp1: float, h: float = 0.5) -> float:
+    """5-point central derivative around alpha=0 with samples at -1, -0.5, 0.5, 1.0."""
+    return (fm1 - 8 * fm05 + 8 * fp05 - fp1) / (12 * h)
 
 
 def make_scope_doc(path: Path) -> None:
     with path.open("w") as f:
-        f.write("# 확정 항목\n\n## 32 Metrics\n")
+        f.write("# v2 확정 항목\n\n## Tier1+Tier2 Metrics (simulation-extracted)\n")
         for m in METRICS_ORDER:
             f.write(f"- {m}\n")
-        f.write("\n## 150 Parameter Items\n")
-        for p in PARAMS_150:
-            f.write(f"- {p}\n")
+        f.write("\n## Tier3 Sweep Parameters\n")
+        f.write("- device별 TT/SS/FF 코너 비교에서 delta가 존재하는 파라미터만 자동 선택\n")
+        f.write("- alpha levels: -1.0, -0.5, 0.0, 0.5, 1.0\n")
 
 
-def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, outdir: Path) -> pd.DataFrame:
+def run_sensitivity_for_device(
+    device_name: str,
+    tt_text: str,
+    ss_text: str,
+    ff_text: str,
+    other_tt_text: str,
+    cfg: BiasConfig,
+    outdir: Path,
+    progress: ProgressTracker,
+    max_params: int | None = None,
+) -> pd.DataFrame:
     rows = []
-    print("[progress] baseline(TT) simulation", flush=True)
+    raw_rows: List[Dict[str, float | str]] = []
+    baseline_rows: List[Dict[str, float | str]] = []
+    delta_params = get_delta_params(tt_text, ss_text, ff_text)
+    if max_params is not None:
+        delta_params = delta_params[: max(0, max_params)]
+    progress.log(f"{device_name} baseline(TT) simulation start")
     with tempfile.TemporaryDirectory() as td:
-        base_model = Path(td) / "tt.spice"
-        base_model.write_text(tt_text)
-        base_metrics = simulate_metrics(base_model, cfg, Path(td))
+        base_model = Path(td) / f"{device_name}_tt.spice"
+        base_model.write_text(merge_model_texts(tt_text, other_tt_text))
+        base_metrics = collect_all_metrics(base_model, cfg, Path(td))
+    baseline_rows.append({"device": device_name, "corner": "TT", "alpha": 0.0, **base_metrics})
+    progress.advance(f"{device_name} baseline(TT) simulation done")
 
-    total = len(PARAMS_150)
-    for idx_param, param in enumerate(PARAMS_150, start=1):
-        print(f"[progress] param {idx_param}/{total}: {param}", flush=True)
+    total_params = len(delta_params)
+    for idx_param, param in enumerate(delta_params, start=1):
+        param_pct = 100.0 * idx_param / max(total_params, 1)
+        print(f"[progress][{device_name} item {idx_param}/{total_params} {param_pct:5.1f}%] param={param}", flush=True)
         row = {"param": param}
         for m in METRICS_ORDER:
             row[f"{m}_sens_SS_5pt"] = np.nan
@@ -363,24 +898,47 @@ def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, o
 
         tt_vals = get_param_values(tt_text, param)
         p0 = float(np.mean(tt_vals))
-        for corner_name, corner_text in (("SS", ss_text), ("FF", ff_text)):
-            print(f"[progress]   corner={corner_name}", flush=True)
+        corners = (("SS", ss_text), ("FF", ff_text))
+        for idx_corner, (corner_name, corner_text) in enumerate(corners, start=1):
+            print(f"[progress][{device_name} item {idx_param}/{total_params}] corner {idx_corner}/{len(corners)}={corner_name}", flush=True)
             c_vals = get_param_values(corner_text, param)
             n = min(len(tt_vals), len(c_vals))
             if n == 0:
                 raise ValueError(f"{param} corner 값이 없습니다.")
             dp = float(np.mean(np.array(c_vals[:n]) - np.array(tt_vals[:n])))
-            metrics_samples = [base_metrics]
-            for alpha in (0.25, 0.5, 0.75, 1.0):
-                print(f"[progress]     alpha={alpha}", flush=True)
-                patched = patch_param_alpha(tt_text, corner_text, param, alpha)
-                with tempfile.TemporaryDirectory() as td:
-                    mp = Path(td) / f"{param}_{corner_name}_{alpha}.spice"
-                    mp.write_text(patched)
-                    metrics_samples.append(simulate_metrics(mp, cfg, Path(td)))
+
+            alpha_points = (-1.0, -0.5, 0.0, 0.5, 1.0)
+            metric_at_alpha: Dict[float, Dict[str, float]] = {}
+            for idx_alpha, alpha in enumerate(alpha_points, start=1):
+                print(
+                    f"[progress][{device_name} item {idx_param}/{total_params}] corner={corner_name} alpha {idx_alpha}/{len(alpha_points)}={alpha}",
+                    flush=True,
+                )
+                if alpha == 0.0:
+                    metric_at_alpha[alpha] = dict(base_metrics)
+                else:
+                    patched = patch_param_alpha(tt_text, corner_text, param, alpha)
+                    with tempfile.TemporaryDirectory() as td:
+                        mp = Path(td) / f"{device_name}_{param}_{corner_name}_{alpha}.spice"
+                        mp.write_text(merge_model_texts(patched, other_tt_text))
+                        metric_at_alpha[alpha] = collect_all_metrics(mp, cfg, Path(td))
+                raw_rows.append(
+                    {
+                        "device": device_name,
+                        "param": param,
+                        "corner": corner_name,
+                        "alpha": alpha,
+                        **metric_at_alpha[alpha],
+                    }
+                )
+                progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} done")
+
             for m in METRICS_ORDER:
-                dfdalpha = five_point_forward(
-                    metrics_samples[0][m], metrics_samples[1][m], metrics_samples[2][m], metrics_samples[3][m], metrics_samples[4][m], 0.25
+                dfdalpha = five_point_central(
+                    metric_at_alpha[-1.0][m],
+                    metric_at_alpha[-0.5][m],
+                    metric_at_alpha[0.5][m],
+                    metric_at_alpha[1.0][m],
                 )
                 m0 = base_metrics[m]
                 if dp == 0 or m0 == 0:
@@ -396,10 +954,13 @@ def run_sensitivity(tt_text: str, ss_text: str, ff_text: str, cfg: BiasConfig, o
 
     df = pd.DataFrame(rows)
     outdir.mkdir(parents=True, exist_ok=True)
-    df.to_csv(outdir / "sensitivity_matrix_5pt.csv", index=False)
-    (outdir / "tt_metrics.json").write_text(json.dumps(base_metrics, indent=2))
-    make_scope_doc(outdir / "scope_32_metrics_150_params.md")
+    df.to_csv(outdir / f"sensitivity_matrix_central5_{device_name}.csv", index=False)
+    (outdir / f"tt_metrics_{device_name}.json").write_text(json.dumps(base_metrics, indent=2))
+    pd.DataFrame(raw_rows).to_csv(outdir / f"metrics_raw_{device_name}.csv", index=False)
+    pd.DataFrame(baseline_rows).to_csv(outdir / f"metrics_baseline_{device_name}.csv", index=False)
     return df
+
+
 
 
 def main() -> None:
@@ -409,21 +970,44 @@ def main() -> None:
     ap.add_argument("--tt-file", default="sky130_fd_pr__nfet_01v8__tt.pm3.spice")
     ap.add_argument("--ss-file", default="sky130_fd_pr__nfet_01v8__ss.pm3.spice")
     ap.add_argument("--ff-file", default="sky130_fd_pr__nfet_01v8__ff.pm3.spice")
+    ap.add_argument("--tt-file-p", default="sky130_fd_pr__pfet_01v8__tt.pm3.spice")
+    ap.add_argument("--ss-file-p", default="sky130_fd_pr__pfet_01v8__ss.pm3.spice")
+    ap.add_argument("--ff-file-p", default="sky130_fd_pr__pfet_01v8__ff.pm3.spice")
+    ap.add_argument("--max-params-per-device", type=int, default=None)
     args = ap.parse_args()
 
     with zipfile.ZipFile(args.spice_zip) as z:
-        tt_text = z.read(args.tt_file).decode("utf-8", errors="ignore")
-        ss_text = z.read(args.ss_file).decode("utf-8", errors="ignore")
-        ff_text = z.read(args.ff_file).decode("utf-8", errors="ignore")
+        n_tt_text = z.read(args.tt_file).decode("utf-8", errors="ignore")
+        n_ss_text = z.read(args.ss_file).decode("utf-8", errors="ignore")
+        n_ff_text = z.read(args.ff_file).decode("utf-8", errors="ignore")
+        p_tt_text = z.read(args.tt_file_p).decode("utf-8", errors="ignore")
+        p_ss_text = z.read(args.ss_file_p).decode("utf-8", errors="ignore")
+        p_ff_text = z.read(args.ff_file_p).decode("utf-8", errors="ignore")
 
-    tt_text = inject_missing_monte_params(tt_text)
-    ss_text = inject_missing_monte_params(ss_text)
-    ff_text = inject_missing_monte_params(ff_text)
+    n_tt_text = inject_missing_monte_params(n_tt_text)
+    n_ss_text = inject_missing_monte_params(n_ss_text)
+    n_ff_text = inject_missing_monte_params(n_ff_text)
+    p_tt_text = inject_missing_monte_params(p_tt_text)
+    p_ss_text = inject_missing_monte_params(p_ss_text)
+    p_ff_text = inject_missing_monte_params(p_ff_text)
     cfg = BiasConfig()
-    cfg.temp = get_tnom_celsius(tt_text, fallback_c=27.0)
+    cfg.temp = get_tnom_celsius(n_tt_text, fallback_c=27.0)
     print(f"[config] temp set from TNOM: {cfg.temp}C", flush=True)
-    df = run_sensitivity(tt_text, ss_text, ff_text, cfg, args.outdir)
-    print(df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
+
+    n_params = get_delta_params(n_tt_text, n_ss_text, n_ff_text)
+    p_params = get_delta_params(p_tt_text, p_ss_text, p_ff_text)
+    if args.max_params_per_device is not None:
+        n_params = n_params[: max(0, args.max_params_per_device)]
+        p_params = p_params[: max(0, args.max_params_per_device)]
+    total_units = 2 + (len(n_params) * 2 * 5) + (len(p_params) * 2 * 5)
+    progress = ProgressTracker(total_units=total_units)
+
+    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
+    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device)
+    make_scope_doc(args.outdir / "scope_32_metrics_150_params.md")
+
+    print(n_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
+    print(p_df[["param", f"{METRICS_ORDER[0]}_sens_avg_5pt"]].head())
 
 
 if __name__ == "__main__":
