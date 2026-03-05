@@ -129,13 +129,6 @@ def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
     common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
     return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
 
-def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
-    tt_map = build_param_map(tt_text)
-    ss_map = build_param_map(ss_text)
-    ff_map = build_param_map(ff_text)
-    common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
-    return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
-
 def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
     try:
         vals = get_param_values(model_text, "tnom")
@@ -903,6 +896,9 @@ def _save_json(path: Path, payload: Dict[str, float | str]) -> None:
     tmp.replace(path)
 
 
+def _nan_metrics() -> Dict[str, float]:
+    return {m: float("nan") for m in METRICS_ORDER}
+
 def _alpha_task(
     device_name: str,
     param: str,
@@ -925,14 +921,26 @@ def _alpha_task(
     model_path = task_dir / "model.spice"
     patched = patch_param_alpha(tt_text, corner_text, param, alpha)
     model_path.write_text(merge_model_texts(patched, other_tt_text))
-    metrics = collect_all_metrics(model_path, cfg, task_dir)
-    row: Dict[str, float | str] = {
-        "device": device_name,
-        "param": param,
-        "corner": corner_name,
-        "alpha": alpha,
-        **metrics,
-    }
+    try:
+        metrics = collect_all_metrics(model_path, cfg, task_dir)
+        row: Dict[str, float | str] = {
+            "device": device_name,
+            "param": param,
+            "corner": corner_name,
+            "alpha": alpha,
+            "status": "ok",
+            **metrics,
+        }
+    except Exception as e:
+        row = {
+            "device": device_name,
+            "param": param,
+            "corner": corner_name,
+            "alpha": alpha,
+            "status": "failed",
+            "error": str(e),
+            **_nan_metrics(),
+        }
     _save_json(result_path, row)
     return row
 
@@ -1040,9 +1048,19 @@ def run_sensitivity_for_device(
                 for fut in as_completed(futures):
                     alpha = futures[fut]
                     row_payload = fut.result()
-                    metric_at_alpha[alpha] = {k: float(v) for k, v in row_payload.items() if k in METRICS_ORDER}
                     raw_rows.append(row_payload)
-                    progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} done")
+                    if row_payload.get("status") == "ok":
+                        metric_at_alpha[alpha] = {k: float(v) for k, v in row_payload.items() if k in METRICS_ORDER}
+                        progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} done")
+                    else:
+                        msg = str(row_payload.get("error", "unknown error")).splitlines()[0][:120]
+                        progress.advance(f"{device_name} param={param} corner={corner_name} alpha={alpha} failed: {msg}")
+
+            required_alphas = (0.0, 0.25, 0.5, 0.75, 1.0)
+            if not all(a in metric_at_alpha for a in required_alphas):
+                for m in METRICS_ORDER:
+                    row[f"{m}_sens_{corner_name}_5pt"] = np.nan
+                continue
 
             for m in METRICS_ORDER:
                 dfdalpha = five_point_forward_at_zero(
