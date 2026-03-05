@@ -23,10 +23,6 @@ METRICS_ORDER = [
     "Ion_rolloff_L_ratio_n", "Ron_narrowW_ratio_n", "Ion_short_narrow_ratio_n", "AX_PD_ratio_Ion", "PD_PU_ratio_Ion",
 ]
 
-PARAMS_150 = [
-    "a0", "ags", "alpha0", "alpha1", "at", "b0", "b1", "beta0", "cdscd", "cgdo", "cgso", "cjs", "cjswgs", "cjsws", "dlc", "drout", "dsub", "dwc", "eta0", "etab", "k1", "k2", "keta", "kt1", "kt2", "la0", "lags", "lalpha0", "lalpha1", "lat", "lb0", "lb1", "lbeta0", "lcdscd", "ldrout", "ldsub", "leta0", "letab", "lint", "lk1", "lk2", "lketa", "lkt1", "lkt2", "lnfactor", "lpclm", "lpdiblc1", "lpdiblc2", "lpdiblcb", "lpscbe1", "lu0", "lua", "lua1", "lub", "lub1", "luc", "luc1", "lute", "lvoff", "lvsat", "lvth0", "nfactor", "pa0", "pags", "palpha0", "palpha1", "pat", "pb0", "pb1", "pbeta0", "pcdscd", "pclm", "pdiblc1", "pdiblc2", "pdiblcb", "pdrout", "pdsub", "peta0", "petab", "pk1", "pk2", "pketa", "pkt1", "pkt2", "pnfactor", "ppclm", "ppdiblc1", "ppdiblc2", "ppdiblcb", "ppscbe1", "pscbe1", "pu0", "pua", "pua1", "pub", "pub1", "puc", "puc1", "pute", "pvoff", "pvsat", "pvth0", "toxe", "u0", "ua", "ua1", "ub", "ub1", "uc", "uc1", "ute", "voff", "vsat", "vth0", "wa0", "wags", "walpha0", "walpha1", "wat", "wb0", "wb1", "wbeta0", "wcdscd", "wdrout", "wdsub", "weta0", "wetab", "wint", "wk1", "wk2", "wketa", "wkt1", "wkt2", "wnfactor", "wpclm", "wpdiblc1", "wpdiblc2", "wpdiblcb", "wpscbe1", "wu0", "wua", "wua1", "wub", "wub1", "wuc", "wuc1", "wute", "wvoff", "wvsat", "wvth0"
-]
-
 @dataclass
 class BiasConfig:
     vdd: float = 1.8
@@ -640,14 +636,14 @@ MP dp gp sp bp sky130_fd_pr__pfet_01v8 l={cfg.l_long} w={cfg.w_wide}
 def simulate_sram_metrics(model_path: Path, cfg: BiasConfig, workdir: Path) -> Dict[str, float]:
     # SRAM 6T (AX/PD/PU): AX=2.7e-7, PD=4.5e-7, PU=2.1e-7, L=1.5e-7
     ax_w, pd_w, pu_w, lmin = 2.7e-7, 4.5e-7, 2.1e-7, 1.5e-7
-    hold_deck = f"""
+
+    hold_tran = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
 VDD vdd 0 {cfg.vdd}
 VWL wl 0 0
 VBL bl 0 {cfg.vdd}
 VBLB blb 0 {cfg.vdd}
-* 6T cell
 MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
 MP2 qb q vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
 MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
@@ -658,42 +654,68 @@ MAX2 qb wl blb 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
 .tran 1p 2n
 .measure tran IAVG avg i(VDD) from=0.5n to=2n
 .measure tran STBY_power param='{cfg.vdd}*abs(IAVG)'
-* Hold SNM proxy from storage-node separation at settle (simulation-based)
-.measure tran SRAM_hold_SNM param='abs(v(q)-v(qb))/2' at=2n
 .end
 """
-    (workdir / "sram_hold.sp").write_text(hold_deck)
-    run_ngspice("sram_hold.sp", workdir)
+    (workdir / "sram_hold_tran.sp").write_text(hold_tran)
+    run_ngspice("sram_hold_tran.sp", workdir)
     hold_log = (workdir / "ngspice.log").read_text(errors="ignore")
 
-    read_deck = f"""
+    hold_dc = f"""
+.include '{model_path.resolve().as_posix()}'
+.option temp={cfg.temp}
+VDD vdd 0 {cfg.vdd}
+VWL wl 0 0
+VBL bl 0 {cfg.vdd}
+VBLB blb 0 {cfg.vdd}
+VFORCE qb 0 0
+MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
+MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
+MAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
+.control
+set wr_singlescale
+dc VFORCE 0 {cfg.vdd} 0.01
+wrdata sram_hold_vtc.dat v(qb) v(q)
+quit
+.endc
+.end
+"""
+    (workdir / "sram_hold_dc.sp").write_text(hold_dc)
+    run_ngspice("sram_hold_dc.sp", workdir)
+    hdf = load_wrdata(workdir / "sram_hold_vtc.dat")
+    hqb = hdf["x_vec0"].to_numpy()
+    hq = hdf["y_vec1"].to_numpy()
+    hold_snm = float(np.min(np.abs(hq - hqb)) / 2.0)
+
+    read_dc = f"""
 .include '{model_path.resolve().as_posix()}'
 .option temp={cfg.temp}
 VDD vdd 0 {cfg.vdd}
 VWL wl 0 {cfg.vdd}
 VBL bl 0 {cfg.vdd - 0.05}
 VBLB blb 0 {cfg.vdd}
-* 6T cell
+VFORCE qb 0 0
 MP1 q qb vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
-MP2 qb q vdd vdd sky130_fd_pr__pfet_01v8 l={lmin} w={pu_w}
 MN1 q qb 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
-MN2 qb q 0 0 sky130_fd_pr__nfet_01v8 l={lmin} w={pd_w}
 MAX1 q wl bl 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
-MAX2 qb wl blb 0 sky130_fd_pr__nfet_01v8 l={lmin} w={ax_w}
-.ic v(q)={cfg.vdd} v(qb)=0
-.tran 1p 2n
-* read SNM proxy under fixed read condition
-.measure tran SRAM_read_margin param='abs(v(q)-v(qb))/2' at=2n
+.control
+set wr_singlescale
+dc VFORCE 0 {cfg.vdd} 0.01
+wrdata sram_read_vtc.dat v(qb) v(q)
+quit
+.endc
 .end
 """
-    (workdir / "sram_read.sp").write_text(read_deck)
-    run_ngspice("sram_read.sp", workdir)
-    read_log = (workdir / "ngspice.log").read_text(errors="ignore")
+    (workdir / "sram_read_dc.sp").write_text(read_dc)
+    run_ngspice("sram_read_dc.sp", workdir)
+    rdf = load_wrdata(workdir / "sram_read_vtc.dat")
+    rqb = rdf["x_vec0"].to_numpy()
+    rq = rdf["y_vec1"].to_numpy()
+    read_snm = float(np.min(np.abs(rq - rqb)) / 2.0)
 
     return {
         "STBY_power": _parse_meas(hold_log, "STBY_power"),
-        "SRAM_hold_SNM": _parse_meas(hold_log, "SRAM_hold_SNM"),
-        "SRAM_read_margin": _parse_meas(read_log, "SRAM_read_margin"),
+        "SRAM_hold_SNM": hold_snm,
+        "SRAM_read_margin": read_snm,
     }
 
 
@@ -805,12 +827,12 @@ def five_point_central(fm1: float, fm05: float, fp05: float, fp1: float, h: floa
 
 def make_scope_doc(path: Path) -> None:
     with path.open("w") as f:
-        f.write("# 확정 항목\n\n## 32 Metrics\n")
+        f.write("# v2 확정 항목\n\n## Tier1+Tier2 Metrics (simulation-extracted)\n")
         for m in METRICS_ORDER:
             f.write(f"- {m}\n")
-        f.write("\n## 150 Parameter Items\n")
-        for p in PARAMS_150:
-            f.write(f"- {p}\n")
+        f.write("\n## Tier3 Sweep Parameters\n")
+        f.write("- device별 TT/SS/FF 코너 비교에서 delta가 존재하는 파라미터만 자동 선택\n")
+        f.write("- alpha levels: -1.0, -0.5, 0.0, 0.5, 1.0\n")
 
 
 def run_sensitivity_for_device(
@@ -903,7 +925,7 @@ def run_sensitivity_for_device(
 
     df = pd.DataFrame(rows)
     outdir.mkdir(parents=True, exist_ok=True)
-    df.to_csv(outdir / f"sensitivity_matrix_5pt_{device_name}.csv", index=False)
+    df.to_csv(outdir / f"sensitivity_matrix_central5_{device_name}.csv", index=False)
     (outdir / f"tt_metrics_{device_name}.json").write_text(json.dumps(base_metrics, indent=2))
     pd.DataFrame(raw_rows).to_csv(outdir / f"metrics_raw_{device_name}.csv", index=False)
     pd.DataFrame(baseline_rows).to_csv(outdir / f"metrics_baseline_{device_name}.csv", index=False)
@@ -944,7 +966,7 @@ def main() -> None:
 
     n_params = get_delta_params(n_tt_text, n_ss_text, n_ff_text)
     p_params = get_delta_params(p_tt_text, p_ss_text, p_ff_text)
-    total_units = 2 + (len(n_params) * 2 * 4) + (len(p_params) * 2 * 4)
+    total_units = 2 + (len(n_params) * 2 * 5) + (len(p_params) * 2 * 5)
     progress = ProgressTracker(total_units=total_units)
 
     n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress)
