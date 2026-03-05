@@ -13,7 +13,7 @@ import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,6 +25,32 @@ METRICS_ORDER = [
     "Junc_leak_n", "Junc_leak_p", "Ig_off_n", "Ig_off_p",
     "Ion_rolloff_L_ratio_n", "Ron_narrowW_ratio_n", "Ion_short_narrow_ratio_n", "AX_PD_ratio_Ion", "PD_PU_ratio_Ion",
 ]
+
+
+TEMPERATURE_SCALABLE_BASE_PARAMS = {
+    "at", "kt1", "kt2", "ua1", "ub1", "uc1", "ute",
+}
+
+TEMPERATURE_ONLY_PARAMS = {
+    "kt1l", "prt",
+    "tcj", "tcjsw", "tcjswg", "tempmod", "tnom",
+    "tpb", "tpbsw", "tpbswg", "tvfbsdoff", "tvoff", "xtis",
+}
+for _base in TEMPERATURE_SCALABLE_BASE_PARAMS:
+    for _prefix in ("", "l", "w", "p"):
+        TEMPERATURE_ONLY_PARAMS.add(f"{_prefix}{_base}")
+
+def filter_temperature_only_params(params: Sequence[str], include_temp_params: bool) -> tuple[list[str], list[str]]:
+    if include_temp_params:
+        return list(params), []
+    kept: list[str] = []
+    excluded: list[str] = []
+    for param in params:
+        if param.lower() in TEMPERATURE_ONLY_PARAMS:
+            excluded.append(param)
+        else:
+            kept.append(param)
+    return kept, excluded
 
 @dataclass
 class BiasConfig:
@@ -977,20 +1003,21 @@ def run_sensitivity_for_device(
     progress: ProgressTracker,
     max_params: int | None = None,
     workers: int = 3,
+    delta_params: Sequence[str] | None = None,
 ) -> pd.DataFrame:
     rows = []
     raw_rows: List[Dict[str, float | str]] = []
     baseline_rows: List[Dict[str, float | str]] = []
-    delta_params = get_delta_params(tt_text, ss_text, ff_text)
+    selected_params = list(delta_params) if delta_params is not None else get_delta_params(tt_text, ss_text, ff_text)
     if max_params is not None:
-        delta_params = delta_params[: max(0, max_params)]
+        selected_params = selected_params[: max(0, max_params)]
     progress.log(f"{device_name} baseline(TT) simulation start")
     base_metrics = _load_or_run_baseline(device_name, tt_text, other_tt_text, cfg, outdir)
     baseline_rows.append({"device": device_name, "corner": "TT", "alpha": 0.0, **base_metrics})
     progress.advance(f"{device_name} baseline(TT) simulation done")
 
-    total_params = len(delta_params)
-    for idx_param, param in enumerate(delta_params, start=1):
+    total_params = len(selected_params)
+    for idx_param, param in enumerate(selected_params, start=1):
         param_pct = 100.0 * idx_param / max(total_params, 1)
         print(f"[progress][{device_name} item {idx_param}/{total_params} {param_pct:5.1f}%] param={param}", flush=True)
         row = {"param": param}
@@ -1177,6 +1204,7 @@ def main() -> None:
     ap.add_argument("--ff-file-p", default="sky130_fd_pr__pfet_01v8__ff.pm3.spice")
     ap.add_argument("--max-params-per-device", type=int, default=None)
     ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--include-temp-params", action="store_true", help="include temperature-only parameters in sensitivity sweep")
     args = ap.parse_args()
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -1199,16 +1227,29 @@ def main() -> None:
     cfg.temp = get_tnom_celsius(n_tt_text, fallback_c=27.0)
     print(f"[config] temp set from TNOM: {cfg.temp}C", flush=True)
 
-    n_params = get_delta_params(n_tt_text, n_ss_text, n_ff_text)
-    p_params = get_delta_params(p_tt_text, p_ss_text, p_ff_text)
+    n_all_params = get_delta_params(n_tt_text, n_ss_text, n_ff_text)
+    p_all_params = get_delta_params(p_tt_text, p_ss_text, p_ff_text)
+    n_filtered_params, n_excluded_temp = filter_temperature_only_params(n_all_params, args.include_temp_params)
+    p_filtered_params, p_excluded_temp = filter_temperature_only_params(p_all_params, args.include_temp_params)
     if args.max_params_per_device is not None:
-        n_params = n_params[: max(0, args.max_params_per_device)]
-        p_params = p_params[: max(0, args.max_params_per_device)]
-    total_units = 2 + (len(n_params) * 2 * 5) + (len(p_params) * 2 * 5)
+        n_filtered_params = n_filtered_params[: max(0, args.max_params_per_device)]
+        p_filtered_params = p_filtered_params[: max(0, args.max_params_per_device)]
+
+    baseline_ops = 2 + (len(n_all_params) * 2 * 5) + (len(p_all_params) * 2 * 5)
+    active_ops = 2 + (len(n_filtered_params) * 2 * 5) + (len(p_filtered_params) * 2 * 5)
+    reduced_ops = baseline_ops - active_ops
+    print(
+        f"[plan] include_temp_params={args.include_temp_params} | nfet params={len(n_filtered_params)} (excluded_temp={len(n_excluded_temp)}) | "
+        f"pfet params={len(p_filtered_params)} (excluded_temp={len(p_excluded_temp)})",
+        flush=True,
+    )
+    print(f"[plan] operation units baseline={baseline_ops}, active={active_ops}, reduced={reduced_ops}", flush=True)
+
+    total_units = active_ops
     progress = ProgressTracker(total_units=total_units)
 
-    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers)
-    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers)
+    n_df = run_sensitivity_for_device("nfet", n_tt_text, n_ss_text, n_ff_text, p_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers, n_filtered_params)
+    p_df = run_sensitivity_for_device("pfet", p_tt_text, p_ss_text, p_ff_text, n_tt_text, cfg, args.outdir, progress, args.max_params_per_device, args.workers, p_filtered_params)
     make_scope_doc(args.outdir / "scope_32_metrics_150_params.md")
 
     if not n_df.empty and f"{METRICS_ORDER[0]}_sens_avg_5pt" in n_df.columns:
