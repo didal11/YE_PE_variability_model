@@ -116,6 +116,34 @@ def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
     common = sorted(set(tt_map) & set(ss_map) & set(ff_map))
     return [param for param in common if not (tt_map[param] == ss_map[param] == ff_map[param])]
 
+
+
+def get_all_params(model_text: str) -> List[str]:
+    seen = set()
+    out = []
+    for m in ASSIGN_RE.finditer(model_text):
+        k = m.group(1).lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(k)
+    return out
+
+
+def get_delta_params(tt_text: str, ss_text: str, ff_text: str) -> List[str]:
+    common = sorted(set(get_all_params(tt_text)) & set(get_all_params(ss_text)) & set(get_all_params(ff_text)))
+    delta = []
+    for param in common:
+        try:
+            tv = get_param_values(tt_text, param)
+            sv = get_param_values(ss_text, param)
+            fv = get_param_values(ff_text, param)
+        except ValueError:
+            continue
+        if not (tv == sv == fv):
+            delta.append(param)
+    return delta
+
 def get_tnom_celsius(model_text: str, fallback_c: float = 27.0) -> float:
     try:
         vals = get_param_values(model_text, "tnom")
